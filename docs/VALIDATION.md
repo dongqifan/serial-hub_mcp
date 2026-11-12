@@ -2,6 +2,13 @@
 
 No customer data, raw terminal output, serial logs or credentials belong here.
 
+## v0.4.0 — CLI COM management
+
+- Windows / Python 3.12: 41 automated tests passed. Real CLI subprocesses against an isolated daemon with simulated serial verified occupy/open, ports JSON, per-port status, refusal to release with a terminal client, successful release after disconnect, and a still-running empty daemon afterward.
+- CLI unit tests cover serial parameters, command aliases, table occupancy wording, invalid port names and nonzero error exits.
+- Installed locally and verified ports/status COM3 against the running hardware daemon: COM3 open at 115200, Telnet 127.0.0.1:2303, one connected terminal client. Existing COM3 was not released/reopened or transmitted to for this validation, to avoid disrupting that client. COM8 hardware was not opened.
+- No daemon restart is required: these commands use the existing open/status/close RPCs. Actual physical-handle release/reacquisition with the new CLI remains untested; simulated lifecycle tests passed.
+
 ## v0.3.0 — no authentication
 
 - Windows / Python 3.12.10: 29 automated tests passed. Coverage includes HTTP RPC without Authorization, retained Host/Origin rejection, real stdio MCP clients and CLI status with no token file (and with an invalid unused legacy file), two Telnet clients writing during an execute wait, and leading LF/NUL plus split CR padding.

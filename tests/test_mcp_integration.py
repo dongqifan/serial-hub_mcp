@@ -48,6 +48,27 @@ async def test_two_real_mcp_clients_share_serial_and_session_identity(rig, monke
         stdout, stderr = await asyncio.wait_for(process.communicate(), 10)
         assert process.returncode == 0, stderr
         assert isinstance(json.loads(stdout), dict)
+        async def run_cli(*arguments, success=True):
+            process = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "serial_hub_mcp.cli", *arguments,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), 10)
+            assert process.returncode == (0 if success else 1), stderr
+            return json.loads(stdout) if success else stderr.decode()
+
+        opened = await run_cli("occupy", "COM3", "--baudrate", "9600")
+        assert opened["config"]["baudrate"] == 9600
+        assert devices["COM3"].writes == []
+        assert (await run_cli("ports", "--json"))["open"][0]["port"] == "COM3"
+        assert (await run_cli("status", "COM3"))["input_mode"] == "shared"
+        hub.get("COM3").clients.add("test-viewer")
+        assert "terminal clients" in await run_cli("release", "COM3", success=False)
+        assert not devices["COM3"].closed
+        hub.get("COM3").clients.clear()
+        assert (await run_cli("release", "COM3")) == {"closed": "COM3"}
+        assert devices["COM3"].closed
+        assert (await run_cli("status"))["open"] == []
         async with AsyncExitStack() as stack:
             sessions = []
             for _ in range(2):

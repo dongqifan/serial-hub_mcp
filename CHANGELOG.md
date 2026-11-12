@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0
+
+- Added CLI open/occupy, close/release, ports (table or JSON), and status COMx commands to manage COM handles in the running daemon without stopping other ports.
+- Open accepts full serial parameters; close retains existing refusal for connected Telnet clients or active execute calls. No forced interruption or command writes are introduced.
+- Added readable daemon/port error reporting and clarified that not held by this hub does not mean free from other applications.
+
 ## 0.3.0
 
 - Removed authentication completely from loopback HTTP RPC, Telnet, MCP adapters and CLI status. Telnet clients connect and type directly without a gateway login.

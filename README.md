@@ -52,6 +52,40 @@ py -3 -m venv .venv
 
 默认 115200 / 8N1 / 无流控，DTR/RTS 预设低电平；其他参数通过 MCP `open_port` 传入。**驱动/硬件仍可能在打开时产生控制线毛刺，不能保证不复位。** 参数不同的重复打开会拒绝，不会悄悄改现有连接。
 
+## 命令行管理 COM 占用 / 释放
+
+先启动共享服务，然后在项目目录的 PowerShell 使用：
+
+```powershell
+# 列出系统串口及本服务占用状态（表格）
+.\.venv\Scripts\serial-hub.exe ports
+
+# 打开并由共享服务持有 COM3；同配置重复打开会复用，不发送串口文本
+.\.venv\Scripts\serial-hub.exe open COM3 --baudrate 115200
+# occupy 与 open 同义
+.\.venv\Scripts\serial-hub.exe occupy COM3 --baudrate 115200
+
+# 查看指定 COM 的串口参数、连接状态、Telnet 入口、客户端数量、活跃 execute 和日志路径
+.\.venv\Scripts\serial-hub.exe status COM3
+
+# 释放 COM3，其他软件随后可以直接打开物理串口；共享服务继续运行
+.\.venv\Scripts\serial-hub.exe release COM3
+# close 与 release 同义
+.\.venv\Scripts\serial-hub.exe close COM3
+
+# 全部状态 / 适合脚本读取的 JSON
+.\.venv\Scripts\serial-hub.exe status
+.\.venv\Scripts\serial-hub.exe ports --json
+```
+
+也可以将 `.\.venv\Scripts\serial-hub.exe` 替换为 `.\.venv\Scripts\python.exe -m serial_hub_mcp.cli`。
+
+- `open` 支持 `--baudrate`、`--bytesize`、`--parity N/E/O/M/S`、`--stopbits`、`--flow-control none/rtscts/xonxoff`、`--dtr`、`--rts`；默认 115200/8N1/无流控/DTR 和 RTS 低。打开串口仍可能造成硬件控制线变化。
+- `ports` 的 `open` 表示本服务持有；`disconnected` 表示服务仍保留断线对象，需要 close/open 恢复；`not-open` **只表示本服务未持有，不证明该 COM 没有被其他软件占用**。不提供其他进程占用者查询。
+- `release/close` 遇到 Telnet 客户端或活跃 `execute` 会拒绝，先断开对应 Telnet 并结束调用。不提供强制中断；被动 MCP 读取者不计入连接数，释放前仍需确认其他会话不再需要日志。
+- 释放后对应 Telnet 入口关闭，其他 COM 不受影响；下次 `open` 才恢复。MCP 仍可再次打开该端口，本命令不是禁止访问开关。
+- 命令只管理正在运行的 daemon，不自动启动服务或自动保存开机串口配置。失败输出错误并返回非零退出码。
+
 只启动一个 daemon（默认 API 端口 8766）。关闭 MCP 会话不关闭 daemon，服务退出才关闭物理串口。首次打开前的日志无法补抓。
 
 ## OpenCode 全局接入（V2）
