@@ -54,6 +54,29 @@ py -3 -m venv .venv
 
 ## 命令行管理 COM 占用 / 释放
 
+### OpenCode `/` 命令（全局）
+
+已配置 `serial_hub` MCP 后，执行一次：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-opencode-commands.ps1
+```
+
+在任意项目的 OpenCode 中使用：
+
+```text
+/serial-ports
+/serial-open COM3 115200
+/serial-status COM3
+/serial-release COM3
+```
+
+`/serial-status` 无参数时列出全部状态。`/serial-open` 省略波特率时默认 115200/8N1/无流控/DTR 和 RTS 低，不发送测试文本。`/serial-release` 只释放指定 COM，保留服务端拒绝正在使用端口的规则。
+
+这些是交给当前会话 AI 执行的命令模板，通过 MCP 查询/操作，不是绕过工具权限的直接 shell 快捷键；请以实际工具返回为准。服务或 MCP 不可用时不自动启动服务。文件安装在 `~/.config/opencode/commands/`（设置 `XDG_CONFIG_HOME` 时遵循该目录），自动加载，必要时 `/reload`，不需要重启 OpenCode。安装脚本不会覆盖内容不同的现有同名命令。
+
+### PowerShell 命令
+
 先启动共享服务，然后在项目目录的 PowerShell 使用：
 
 ```powershell

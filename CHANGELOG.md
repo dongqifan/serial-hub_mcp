@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added global OpenCode /serial-ports, /serial-open, /serial-status and /serial-release command templates backed by existing MCP tools, plus a non-overwriting installation script.
+
 ## 0.4.0
 
 - Added CLI open/occupy, close/release, ports (table or JSON), and status COMx commands to manage COM handles in the running daemon without stopping other ports.
