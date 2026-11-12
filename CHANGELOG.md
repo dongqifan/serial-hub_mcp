@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+
+- Removed authentication completely from loopback HTTP RPC, Telnet, MCP adapters and CLI status. Telnet clients connect and type directly without a gateway login.
+- Removed token creation/loading and the token-path command. Existing access.token files are unused and left untouched.
+- Kept IPv4 loopback-only listeners and HTTP Host/Origin checks; all local clients are trusted by design.
+- Corrected initial Telnet CR-padding state so a leading LF or NUL is not swallowed; retained shared concurrent input/output and control-character forwarding.
+
 ## 0.2.0
 
 - Correct concurrency semantics: all MCP and Telnet clients can write immediately, including while other execute calls await output.

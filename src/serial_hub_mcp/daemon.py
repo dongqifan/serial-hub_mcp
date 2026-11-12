@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 from contextlib import asynccontextmanager
-import secrets
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -43,14 +42,11 @@ async def dispatch(hub: Hub, operation: str, args: dict, owner: str) -> dict:
     raise HubError("Unknown operation")
 
 
-def create_app(hub: Hub, token: str) -> Starlette:
+def create_app(hub: Hub) -> Starlette:
     async def rpc(request: Request):
         # No browser-origin requests, even if a malicious page knows the URL.
         if request.headers.get("origin"):
             return JSONResponse({"error": "Browser origins are not allowed"}, status_code=403)
-        expected = "Bearer " + token
-        if not secrets.compare_digest(request.headers.get("authorization", "").encode("utf-8"), expected.encode("ascii")):
-            return JSONResponse({"error": "Unauthorized"}, status_code=401)
         if request.headers.get("host") not in {"127.0.0.1", "localhost", f"127.0.0.1:{request.url.port}", f"localhost:{request.url.port}"}:
             return JSONResponse({"error": "Invalid Host"}, status_code=403)
         raw = bytearray()

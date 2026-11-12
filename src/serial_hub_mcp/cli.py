@@ -11,7 +11,7 @@ import uvicorn
 
 from .core import Hub, PortConfig
 from .daemon import create_app
-from .settings import api_url, load_token, state_directory, token_file
+from .settings import api_url, state_directory
 from .terminal import Terminals
 
 
@@ -21,16 +21,15 @@ async def serve(args) -> None:
     sock = socket.socket()
     sock.bind(("127.0.0.1", int(api_url().rsplit(":", 1)[1])))
     sock.listen(128)
-    token = load_token(create=True)
     hub = Hub(state_directory() / "logs")
-    hub.terminals = Terminals(token, args.telnet_base, args.encoding)
+    hub.terminals = Terminals(args.telnet_base, args.encoding)
     try:
         for name in args.port:
             result = await hub.open(name, PortConfig(baudrate=args.baudrate))
             print(f"{result['port']}: Telnet {result['telnet']}", flush=True)
         print(f"Serial Hub API: {api_url()} (loopback only)", flush=True)
-        print(f"Telnet access token file: {token_file()} (never publish)", flush=True)
-        config = uvicorn.Config(create_app(hub, token), host="127.0.0.1",
+        print("Authentication disabled; local clients connect directly.", flush=True)
+        config = uvicorn.Config(create_app(hub), host="127.0.0.1",
                                 port=int(api_url().rsplit(":", 1)[1]), access_log=False)
         await uvicorn.Server(config).serve(sockets=[sock])
     finally:
@@ -57,7 +56,6 @@ def main() -> None:
     daemon.add_argument("--encoding", default="utf-8", help="Xshell text encoding (MCP can choose per call)")
     commands.add_parser("mcp", help="Run lightweight stdio MCP adapter; never opens hardware itself")
     commands.add_parser("status", help="Show daemon inventory")
-    commands.add_parser("token-path", help="Show token file path, not its contents")
     args = parser.parse_args()
     if args.command == "serve":
         try:
@@ -67,11 +65,9 @@ def main() -> None:
     elif args.command == "mcp":
         from .mcp_server import main as mcp_main
         mcp_main()
-    elif args.command == "token-path":
-        print(token_file())
     elif args.command == "status":
         with httpx.Client(trust_env=False, timeout=5) as client:
-            response = client.post(api_url() + "/rpc", headers={"Authorization": "Bearer " + load_token()},
+            response = client.post(api_url() + "/rpc",
                                    json={"owner": "cli", "operation": "list_ports", "arguments": {}})
             response.raise_for_status()
             print(json.dumps(response.json(), ensure_ascii=True, indent=2))

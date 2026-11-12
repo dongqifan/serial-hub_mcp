@@ -1,6 +1,7 @@
 import asyncio
 
 import telnetlib3
+import pytest
 
 from serial_hub_mcp.core import PortConfig
 from serial_hub_mcp.terminal import Terminals
@@ -17,23 +18,20 @@ async def until(reader, needle, timeout=4):
     return text
 
 
-async def connect(port, token):
+async def connect(port):
     reader, writer = await telnetlib3.open_connection("127.0.0.1", port, connect_maxwait=0.1)
-    await until(reader, "Access token: ")
-    writer.write(token + "\r\n")
-    await writer.drain()
-    await until(reader, "no takeover keys.\r\n")
+    banner = await until(reader, "no takeover keys.\r\n")
+    assert "Access token" not in banner
     return reader, writer
 
 
 async def test_all_telnet_clients_write_immediately_during_mcp_execute(rig):
     hub, devices = rig
-    token = "test-secret" * 4
-    hub.terminals = Terminals(token, base_port=33000)
+    hub.terminals = Terminals(base_port=33000)
     state = await hub.open("COM3", PortConfig())
     endpoint = int(state["telnet"].rsplit(":", 1)[1])
-    reader, writer = await connect(endpoint, token)
-    other_reader, other_writer = await connect(endpoint, token)
+    reader, writer = await connect(endpoint)
+    other_reader, other_writer = await connect(endpoint)
     device, port = devices["COM3"], hub.get("COM3")
     operation = asyncio.create_task(port.execute("ai", "slow", "root# ", timeout=2))
     try:
@@ -64,18 +62,30 @@ async def test_all_telnet_clients_write_immediately_during_mcp_execute(rig):
         other_writer.close()
 
 
-async def test_telnet_bad_token_cannot_access_hardware(rig):
+@pytest.mark.parametrize("first", ["\n", "\x00"])
+async def test_telnet_first_input_is_not_consumed_as_login_or_cr_padding(rig, first):
     hub, devices = rig
-    hub.terminals = Terminals("test-secret" * 4, base_port=34000)
+    hub.terminals = Terminals(base_port=34000)
     state = await hub.open("COM3", PortConfig())
     endpoint = int(state["telnet"].rsplit(":", 1)[1])
     reader, writer = await telnetlib3.open_connection("127.0.0.1", endpoint, connect_maxwait=0.1)
     try:
-        await until(reader, "Access token: ")
-        writer.write("incorrect\r")
+        # Send before even reading the banner: no gateway login handshake.
+        writer.write(first + "direct\r")
         await writer.drain()
-        await until(reader, "Authentication failed")
-        assert devices["COM3"].writes == []
-        assert not hub.get("COM3").clients
+        await until(reader, "no takeover keys.\r\n")
+        for _ in range(100):
+            if b"".join(devices["COM3"].writes).endswith(b"direct\r"):
+                break
+            await asyncio.sleep(0.01)
+        assert b"".join(devices["COM3"].writes) == (first + "direct\r").encode()
+        # CR padding can arrive in the next network chunk.
+        writer.write("\nnext\r")
+        await writer.drain()
+        await asyncio.sleep(0.05)
+        writer.write("\x00last\r\n")
+        await writer.drain()
+        await asyncio.sleep(0.05)
+        assert b"".join(devices["COM3"].writes) == (first + "direct\rnext\rlast\r").encode()
     finally:
         writer.close()

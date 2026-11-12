@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import codecs
-import secrets
 import uuid
 
 import telnetlib3
@@ -11,27 +10,9 @@ import telnetlib3
 from .core import HubError, SerialPort
 
 
-async def read_line(reader, limit: int = 256) -> str:
-    result = ""
-    while True:
-        char = await reader.read(1)
-        if not char:
-            raise EOFError
-        if char in "\r\n":
-            return result
-        if char == "\x00":
-            continue
-        if char in ("\x08", "\x7f"):
-            result = result[:-1]
-        else:
-            result += char
-        if len(result) > limit:
-            raise HubError("Input line too long")
-
-
 class Terminals:
-    def __init__(self, token: str, base_port: int = 2300, encoding: str = "utf-8"):
-        self.token, self.base_port, self.encoding = token, base_port, encoding
+    def __init__(self, base_port: int = 2300, encoding: str = "utf-8"):
+        self.base_port, self.encoding = base_port, encoding
         codecs.lookup(encoding)
         if not 1024 <= base_port <= 64000:
             raise ValueError("Telnet base port must be 1024..64000")
@@ -65,20 +46,11 @@ class Terminals:
         self.connections.add(writer)
         owner = "human:" + uuid.uuid4().hex[:12]
         pump = None
-        authenticated = False
         try:
-            writer.write(f"\r\nSerial Hub - {port.name}\r\nAccess token: ")
-            await writer.drain()
-            supplied = await asyncio.wait_for(read_line(reader), timeout=30)
-            if not secrets.compare_digest(supplied.encode("utf-8"), self.token.encode("ascii")):
-                writer.write("\r\nAuthentication failed.\r\n")
-                await writer.drain()
-                return
             if len(port.clients) >= 16:
                 writer.write("\r\nToo many terminal clients.\r\n")
                 await writer.drain()
                 return
-            authenticated = True
             port.clients.add(owner)
             writer.write(f"\r\n[hub] Connected to {port.name} in SHARED READ/WRITE mode.\r\n"
                          "[hub] All clients can type immediately. Input/output may mix; no takeover keys.\r\n")
@@ -86,7 +58,7 @@ class Terminals:
             pump = asyncio.create_task(self._output(port, writer))
             # A failed/slow output consumer must also disconnect its input side.
             pump.add_done_callback(lambda _: writer.close())
-            after_cr = True  # swallow optional LF/NUL left from token CRLF
+            after_cr = False
             while True:
                 chunk = await reader.read(1024)
                 if not chunk:
@@ -112,8 +84,7 @@ class Terminals:
             if pump:
                 pump.cancel()
                 await asyncio.gather(pump, return_exceptions=True)
-            if authenticated:
-                port.clients.discard(owner)
+            port.clients.discard(owner)
             writer.close()
             self.connections.discard(writer)
             self.tasks.discard(task)

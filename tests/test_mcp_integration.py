@@ -10,9 +10,9 @@ import sys
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 import uvicorn
+import pytest
 
 from serial_hub_mcp.daemon import create_app
-from serial_hub_mcp.settings import load_token
 
 
 def result_data(result):
@@ -20,16 +20,20 @@ def result_data(result):
     return result.structuredContent or json.loads(result.content[0].text)
 
 
-async def test_two_real_mcp_clients_share_serial_and_session_identity(rig, monkeypatch, tmp_path):
+@pytest.mark.parametrize("legacy_token", [False, True])
+async def test_two_real_mcp_clients_share_serial_and_session_identity(rig, monkeypatch, tmp_path, legacy_token):
     hub, devices = rig
     monkeypatch.setenv("SERIAL_HUB_HOME", str(tmp_path / "state"))
-    token = load_token(create=True)
+    old_file = tmp_path / "state" / "access.token"
+    if legacy_token:
+        old_file.parent.mkdir()
+        old_file.write_bytes(b"\xffinvalid legacy token")
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     sock.listen()
     port = sock.getsockname()[1]
     monkeypatch.setenv("SERIAL_HUB_API_PORT", str(port))
-    server = uvicorn.Server(uvicorn.Config(create_app(hub, token), log_level="error", access_log=False))
+    server = uvicorn.Server(uvicorn.Config(create_app(hub), log_level="error", access_log=False))
     task = asyncio.create_task(server.serve(sockets=[sock]))
     try:
         for _ in range(100):
@@ -37,6 +41,13 @@ async def test_two_real_mcp_clients_share_serial_and_session_identity(rig, monke
                 break
             await asyncio.sleep(0.01)
         assert server.started
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "serial_hub_mcp.cli", "status",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), 10)
+        assert process.returncode == 0, stderr
+        assert isinstance(json.loads(stdout), dict)
         async with AsyncExitStack() as stack:
             sessions = []
             for _ in range(2):
@@ -67,6 +78,10 @@ async def test_two_real_mcp_clients_share_serial_and_session_identity(rig, monke
             assert {x["source"] for x in events if x["kind"] == "tx"} == {"mcp:session-a", "mcp:session-b"}
         # Ending all MCP processes does not stop the shared serial connection.
         assert hub.get("COM3").connected and not devices["COM3"].closed
+        if legacy_token:
+            assert old_file.read_bytes() == b"\xffinvalid legacy token"
+        else:
+            assert not old_file.parent.exists()
     finally:
         server.should_exit = True
         await asyncio.wait_for(task, 10)

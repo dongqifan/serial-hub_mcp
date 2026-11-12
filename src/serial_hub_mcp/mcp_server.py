@@ -5,7 +5,7 @@ import uuid
 import httpx
 from mcp.server.fastmcp import Context, FastMCP
 
-from .settings import api_url, load_token
+from .settings import api_url
 
 
 def create_mcp() -> FastMCP:
@@ -32,9 +32,8 @@ def create_mcp() -> FastMCP:
         if not isinstance(owner, str) or not owner:
             owner = fallback
         try:
-            token = load_token()
             async with httpx.AsyncClient(timeout=httpx.Timeout(200, connect=3), trust_env=False) as client:
-                response = await client.post(api_url() + "/rpc", headers={"Authorization": "Bearer " + token},
+                response = await client.post(api_url() + "/rpc",
                                              json={"owner": owner, "operation": operation, "arguments": arguments})
                 data = response.json()
                 if response.is_error:
