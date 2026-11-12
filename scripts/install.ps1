@@ -15,5 +15,5 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Tests failed; installation is not verified' }
 } finally { Pop-Location }
 Write-Host "Installed. Start daemon: & '$root\.venv\Scripts\serial-hub.exe' serve"
-Write-Host "MCP command: $root\.venv\Scripts\serial-hub-mcp.exe"
+Write-Host "MCP command: $root\.venv\Scripts\python.exe -m serial_hub_mcp.mcp_server"
 Write-Host 'OpenCode configuration and startup tasks are NOT modified by this installer.'

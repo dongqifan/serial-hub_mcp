@@ -1,5 +1,7 @@
 import asyncio
 import base64
+import json
+from pathlib import Path
 
 import pytest
 
@@ -21,6 +23,7 @@ async def test_open_reuses_without_transmit_and_rejects_config_change(rig):
     first = await hub.open("com3", PortConfig())
     second = await hub.open("COM3", PortConfig())
     assert first["cursor_end"] == second["cursor_end"]
+    assert first["input_mode"] == "shared"
     assert devices["COM3"].writes == []
     with pytest.raises(HubError, match="different parameters"):
         await hub.open("COM3", PortConfig(baudrate=9600))
@@ -33,8 +36,7 @@ async def test_independent_readers_and_overflow(rig):
     start = port.cursor(0)
     await receive(port, devices["COM3"], b"boot\r\n")
     a, b = await asyncio.gather(port.read(start), port.read(start))
-    assert a == b
-    assert a["text"] == "boot\r\n"
+    assert a == b and a["text"] == "boot\r\n"
     await receive(port, devices["COM3"], b"x" * 200)
     overflow = await port.read(start)
     assert overflow["bytes_lost"] == 78
@@ -50,66 +52,57 @@ async def test_cursor_rejects_previous_opening(rig):
         await hub.get("COM3").read(state["cursor_end"])
 
 
-async def test_complete_transactions_are_fifo(rig):
+async def test_all_execute_calls_write_before_any_response(rig):
     hub, devices = rig
     await hub.open("COM3", PortConfig())
     port, device = hub.get("COM3"), devices["COM3"]
-    loop = asyncio.get_running_loop()
+    operations = [asyncio.create_task(port.execute(str(i), f"cmd{i}", "root# ", timeout=2)) for i in range(4)]
+    try:
+        await asyncio.sleep(0.05)
+        # No queue for command completion: all four writes precede the first RX.
+        assert device.writes == [f"cmd{i}\r".encode() for i in range(4)]
+        assert port.active_executions == 4
+        assert all(not op.done() for op in operations)
+        device.input.put(b"shared response\r\nroot# ")
+        results = await asyncio.gather(*operations)
+        assert all(r["outcome"] == "matched" and r["shared_output"] for r in results)
+        assert [r["additional_writes_observed"] for r in results] == [3, 2, 1, 0]
+        assert len({r["text"] for r in results}) == 1
+        assert port.active_executions == 0
+    finally:
+        for op in operations:
+            op.cancel()
+        await asyncio.gather(*operations, return_exceptions=True)
 
-    def respond(data):
-        loop.call_later(0.08, device.input.put, data + b"\r\nroot# ")
 
-    device.responder = respond
-    results = await asyncio.gather(*[
-        port.execute(str(i), f"cmd{i}", "root# ", timeout=2) for i in range(4)
-    ])
-    assert device.writes == [f"cmd{i}\r".encode() for i in range(4)]
-    assert all(r["outcome"] == "matched" for r in results)
-    assert all(f"cmd{i}" in r["text"] for i, r in enumerate(results))
-    assert not port.uncertain and port.owner is None
-
-
-async def test_timeout_requires_explicit_recovery_and_no_ctrl_c(rig):
+async def test_send_during_execute_is_immediate_and_does_not_cancel_it(rig):
     hub, devices = rig
     await hub.open("COM3", PortConfig())
-    port = hub.get("COM3")
-    result = await port.execute("a", "long_command", "root# ", timeout=0.1)
-    assert result["outcome"] == "timeout" and result["needs_confirmation"]
-    assert devices["COM3"].writes == [b"long_command\r"]
-    with pytest.raises(HubError, match="unknown"):
-        await port.acquire("b")
-    await port.acknowledge("b")
-    await port.acquire("b")
-    assert port.owner == "b"
-
-
-async def test_expired_manual_lease_does_not_mark_terminal_idle(rig):
-    hub, devices = rig
-    await hub.open("COM3", PortConfig())
-    port = hub.get("COM3")
-    await port.acquire("a")
-    await port.send("a", b"interactive\r")
-    port.deadline = 0
-    with pytest.raises(HubError, match="unknown"):
-        await port.acquire("b")
-    assert devices["COM3"].writes == [b"interactive\r"]
-
-
-async def test_human_takeover_interrupts_without_releasing_human(rig):
-    hub, devices = rig
-    await hub.open("COM3", PortConfig())
-    port = hub.get("COM3")
-    operation = asyncio.create_task(port.execute("ai", "slow", "root# ", timeout=5))
+    port, device = hub.get("COM3"), devices["COM3"]
+    operation = asyncio.create_task(port.execute("ai", "slow", "root# ", timeout=2))
     await asyncio.sleep(0.05)
-    await port.acquire("human", force=True)
-    result = await asyncio.wait_for(operation, 1)
-    assert result["outcome"] == "interrupted"
-    assert port.owner == "human" and port.uncertain
-    await port.send("human", b"\x03")
-    assert devices["COM3"].writes == [b"slow\r", b"\x03"]
+    await port.send("human", b"human\r")
+    await port.send("other-ai", b"other\r")
+    assert device.writes == [b"slow\r", b"human\r", b"other\r"]
+    assert not operation.done()
+    device.input.put(b"root# ")
+    result = await operation
+    assert result["outcome"] == "matched" and result["additional_writes_observed"] == 2
 
 
-async def test_cancelled_execute_releases_but_preserves_unknown_state(rig):
+async def test_timeout_does_not_gate_next_writer_or_send_ctrl_c(rig):
+    hub, devices = rig
+    await hub.open("COM3", PortConfig())
+    port, device = hub.get("COM3"), devices["COM3"]
+    result = await port.execute("a", "long_command", "root# ", timeout=0.1)
+    assert result["outcome"] == "timeout"
+    await port.send("b", b"new input\r")
+    device.responder = lambda data: device.input.put(b"root# ")
+    assert (await port.execute("c", "pwd", "root# "))["outcome"] == "matched"
+    assert device.writes == [b"long_command\r", b"new input\r", b"pwd\r"]
+
+
+async def test_cancelled_execute_does_not_stop_other_clients(rig):
     hub, devices = rig
     await hub.open("COM3", PortConfig())
     port = hub.get("COM3")
@@ -118,22 +111,21 @@ async def test_cancelled_execute_releases_but_preserves_unknown_state(rig):
     operation.cancel()
     with pytest.raises(asyncio.CancelledError):
         await operation
-    assert port.owner is None and port.uncertain
+    assert port.active_executions == 0
+    await port.send("b", b"x")
+    assert devices["COM3"].writes == [b"slow\r", b"x"]
 
 
-async def test_different_ports_can_execute_concurrently(rig):
+async def test_different_ports_execute_concurrently(rig):
     hub, devices = rig
     for name in ("COM3", "COM8"):
         await hub.open(name, PortConfig())
-        device = devices[name]
-        device.responder = lambda data, d=device: d.input.put(b"root# ")
-    results = await asyncio.gather(*[
-        hub.get(name).execute("a", "pwd", "root# ") for name in ("COM3", "COM8")
-    ])
+        devices[name].responder = lambda data, d=devices[name]: d.input.put(b"root# ")
+    results = await asyncio.gather(*[hub.get(name).execute("a", "pwd", "root# ") for name in ("COM3", "COM8")])
     assert all(r["outcome"] == "matched" for r in results)
 
 
-async def test_disconnect_is_not_idle_and_does_not_retry(rig):
+async def test_disconnect_does_not_retry(rig):
     hub, devices = rig
     await hub.open("COM3", PortConfig())
     port = hub.get("COM3")
@@ -142,14 +134,13 @@ async def test_disconnect_is_not_idle_and_does_not_retry(rig):
         if not port.connected:
             break
         await asyncio.sleep(0.01)
-    assert not port.connected and port.uncertain
-    assert port.error == "unplugged"
+    assert not port.connected and port.error == "unplugged"
     with pytest.raises(HubError, match="disconnected"):
-        await port.acquire("a")
+        await port.send("a", b"x")
     assert devices["COM3"].writes == []
 
 
-async def test_close_refuses_viewer_and_other_owner(rig):
+async def test_close_refuses_viewer_or_active_execution(rig):
     hub, _ = rig
     await hub.open("COM3", PortConfig())
     port = hub.get("COM3")
@@ -157,9 +148,11 @@ async def test_close_refuses_viewer_and_other_owner(rig):
     with pytest.raises(HubError):
         await hub.close_port("COM3", "a")
     port.clients.clear()
-    await port.acquire("b")
+    port.active_executions = 1
     with pytest.raises(HubError):
         await hub.close_port("COM3", "a")
+    port.active_executions = 0
+    await hub.close_port("COM3", "anyone")
 
 
 @pytest.mark.parametrize("value", ["COM0", "COM65536", "../COM3", "loop://", "COM3;whoami"])
@@ -168,72 +161,35 @@ def test_reject_invalid_port_names(value):
         port_name(value)
 
 
-async def test_no_writes_without_control(rig):
+async def test_every_client_can_send_without_acquisition(rig):
     hub, devices = rig
     await hub.open("COM3", PortConfig())
-    with pytest.raises(HubError, match="lease"):
-        await hub.get("COM3").send("a", b"x")
-    assert not devices["COM3"].writes
-
-
-async def test_cancelled_queued_caller_does_not_block_next(rig):
-    hub, _ = rig
-    await hub.open("COM3", PortConfig())
     port = hub.get("COM3")
-    await port.acquire("a")
-    waiting = asyncio.create_task(port.acquire("b", wait_seconds=2))
-    await asyncio.sleep(0.03)
-    waiting.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await waiting
-    assert not port.queue
-    await port.release("a")
-    await port.acquire("c")
-    assert port.owner == "c"
+    await asyncio.gather(*[port.send(str(i), str(i).encode()) for i in range(5)])
+    assert devices["COM3"].writes == [str(i).encode() for i in range(5)]
 
 
-async def test_execute_under_existing_lease_keeps_reservation(rig):
+async def test_partial_write_does_not_block_future_writes(rig):
     hub, devices = rig
     await hub.open("COM3", PortConfig())
     port, device = hub.get("COM3"), devices["COM3"]
-    device.responder = lambda data: device.input.put(b"root# ")
-    await port.acquire("a")
-    result = await port.execute("a", "pwd", "root# ")
-    assert result["outcome"] == "matched" and port.owner == "a"
-    with pytest.raises(HubError):
-        await port.acquire("b")
-
-
-async def test_confirmation_cannot_clear_another_controllers_state(rig):
-    hub, _ = rig
-    await hub.open("COM3", PortConfig())
-    port = hub.get("COM3")
-    await port.acquire("a")
-    await port.send("a", b"x")
-    with pytest.raises(HubError):
-        await port.acknowledge("b")
-    assert port.uncertain
-
-
-async def test_partial_write_preserves_uncertainty(rig):
-    hub, devices = rig
-    await hub.open("COM3", PortConfig())
-    port, device = hub.get("COM3"), devices["COM3"]
+    original = device.write
     device.write = lambda data: len(data) - 1
     with pytest.raises(HubError, match="Partial"):
         await port.execute("a", "pwd", "root# ")
-    assert port.uncertain and port.owner is None
+    assert port.active_executions == 0
+    device.write = original
+    await port.send("b", b"x")
+    assert device.writes == [b"x"]
 
 
-async def test_journal_contains_exact_bytes_not_only_decoded_text(rig):
-    import json
-    from pathlib import Path
+async def test_journal_contains_exact_bytes_and_source(rig):
     hub, devices = rig
     await hub.open("COM3", PortConfig())
     port = hub.get("COM3")
     raw = b"\xff\x00\r\n"
     await receive(port, devices["COM3"], raw)
-    await port.acquire("a")
-    await port.send("a", raw)
+    await port.send("source-a", raw)
     events = [json.loads(line) for line in Path(port.journal.path).read_text().splitlines()]
     assert [base64.b64decode(x["base64"]) for x in events if x["kind"] in ("rx", "tx")] == [raw, raw]
+    assert next(x for x in events if x["kind"] == "tx")["source"] == "source-a"

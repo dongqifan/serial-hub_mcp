@@ -7,6 +7,7 @@ This is a local developer tool, not a remote multi-tenant console server.
 - Protect `%LOCALAPPDATA%/serial-hub-mcp` with Windows account permissions. The default inherits the user's profile ACLs; no additional multi-user sandbox is claimed.
 - RX/TX JSONL logs contain raw base64 payloads, including passwords and customer information. Base64 is not encryption. Do not attach logs, token files, configuration secrets or device output to public issues.
 - Tool access permits arbitrary serial input. Do not grant autonomous destructive hardware operations merely because the tool is installed.
+- All authenticated MCP/Telnet clients can write concurrently without ownership. Inputs may mix, control keys affect the shared terminal, and any client's output can satisfy another client's expect string. No command-response isolation or safe concurrent shell execution is claimed.
 - Open/close may affect control lines depending on hardware and drivers; test reset-sensitive hardware separately.
 - Default limits: 32 open ports, 16 authenticated viewers per port, 128 active Telnet shells, 30-second authentication deadline, bounded RX and per-port log rotation. These are not a comprehensive defense against malicious local processes.
 

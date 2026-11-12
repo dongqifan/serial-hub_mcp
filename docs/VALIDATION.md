@@ -1,12 +1,18 @@
 # Validation record
 
-No customer data, terminal output, COM logs or credentials belong in this document.
+No customer data, raw terminal output, serial logs or credentials belong here.
 
-- Automated tests: 28 passed locally on Windows, Python 3.12.10. Includes two real stdio MCP client processes through an authenticated HTTP daemon with simulated serial I/O.
-- Windows COM3 hardware: verified at 115200 / 8N1 / no flow control. Two independent MCP adapter processes issued harmless shell `echo` markers concurrently; both transactions completed, independent readers returned identical RX, and a third Telnet protocol client observed both outputs. Telnet acquired input control, sent another harmless marker, confirmed idle and released control. Closing MCP clients did not disconnect serial capture. No reboot, flash or configuration change was used.
-- Real hardware human-preemption, USB unplug/replug, long-running stress and COM8 concurrency: not tested. Mock tests cover preemption, disconnected reads and independent ports.
-- Xshell application: not yet manually verified (protocol-level Telnet tests are not Xshell UI verification).
-- COM8: not tested; no authorization to operate it has been assumed.
-- OpenCode: global MCP registration loaded successfully; an actual OpenCode tool call executed a harmless marker on COM3.
-- Windows logon task: registered for current user and manually started successfully with pythonw.exe; loopback API was reachable and COM3 reopened through the existing OpenCode MCP adapter. Full sign-out/sign-in or reboot startup has not been tested.
-- GitHub Actions: all six Windows/Ubuntu × Python 3.11/3.12/3.13 jobs passed for initial source commit `9eea3bf`: https://github.com/dongqifan/serial-hub_mcp/actions/runs/43165294313 . Linux CI uses simulated serial, not Linux hardware support.
+## v0.2.0 — free concurrent input/output
+
+- Windows / Python 3.12.10: 24 automated tests passed. Simulated serial tests explicitly assert all execute calls write before any response, two authenticated Telnet clients write while MCP execute waits, former takeover/control keys pass through, timeout does not gate later input, and independent readers see identical RX.
+- Windows COM3, 115200 / 8N1 / no flow control: verified with two real stdio MCP client processes and two Telnet protocol clients. One execute deliberately waited for a later marker; while it was still waiting, the other MCP client and both Telnet clients immediately sent harmless echo commands without any acquisition step. All outputs reached both Telnet clients and the MCP readers returned identical bytes. The waiting execute reported four additional writes and completed on the final marker. No reboot, flash or configuration change was performed.
+- Installed daemon restarted under the existing current-user logon task. COM3 reopened and returned input_mode=shared and Telnet 127.0.0.1:2303.
+- Actual Xshell application UI: not manually verified. Telnet protocol tests do not establish Xshell UI acceptance.
+- USB unplug/replug, long-duration stress and real COM8 concurrency: not tested. No COM8 hardware was opened.
+- GitHub Actions for v0.2: see repository Actions; local passing tests are not remote CI evidence.
+
+## Historical v0.1.0
+
+28 local tests and six Windows/Ubuntu × Python 3.11/3.12/3.13 CI jobs passed for initial source commit 9eea3bf (run 43165294313). That version used control leases and command transaction queues; those semantics were rejected and replaced in v0.2, so the old tests are not evidence of current concurrency behavior.
+
+Current-user logon startup was manually started and checked; a full sign-out/sign-in or reboot remains untested. Linux CI uses simulated I/O, not Linux hardware support.

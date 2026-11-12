@@ -1,9 +1,8 @@
 import asyncio
 
-import pytest
 import telnetlib3
 
-from serial_hub_mcp.core import HubError, PortConfig
+from serial_hub_mcp.core import PortConfig
 from serial_hub_mcp.terminal import Terminals
 
 
@@ -21,13 +20,13 @@ async def until(reader, needle, timeout=4):
 async def connect(port, token):
     reader, writer = await telnetlib3.open_connection("127.0.0.1", port, connect_maxwait=0.1)
     await until(reader, "Access token: ")
-    writer.write(token + "\r")
+    writer.write(token + "\r\n")
     await writer.drain()
-    await until(reader, "discarded.\r\n")
+    await until(reader, "no takeover keys.\r\n")
     return reader, writer
 
 
-async def test_telnet_watch_control_takeover_and_two_viewers(rig):
+async def test_all_telnet_clients_write_immediately_during_mcp_execute(rig):
     hub, devices = rig
     token = "test-secret" * 4
     hub.terminals = Terminals(token, base_port=33000)
@@ -36,34 +35,31 @@ async def test_telnet_watch_control_takeover_and_two_viewers(rig):
     reader, writer = await connect(endpoint, token)
     other_reader, other_writer = await connect(endpoint, token)
     device, port = devices["COM3"], hub.get("COM3")
+    operation = asyncio.create_task(port.execute("ai", "slow", "root# ", timeout=2))
     try:
-        writer.write("discarded\r")
+        await asyncio.sleep(0.05)
+        writer.write("human-a\r\n")
+        other_writer.write("human-b\r\x00")
+        await writer.drain()
+        await other_writer.drain()
+        await asyncio.sleep(0.1)
+        combined = b"".join(device.writes)
+        assert b"slow\r" in combined and b"human-a\r" in combined and b"human-b\r" in combined
+        assert b"\n" not in combined and b"\x00" not in combined
+        assert not operation.done()
+        device.input.put(b"all clients see this\r\nroot# ")
+        await until(reader, "all clients see this\r\n")
+        await until(other_reader, "all clients see this\r\n")
+        result = await operation
+        assert result["outcome"] == "matched" and result["additional_writes_observed"] >= 2
+        # Former management sequence is now ordinary serial input.
+        writer.write("\x1da\x03")
         await writer.drain()
         await asyncio.sleep(0.05)
-        assert device.writes == []
-        device.input.put(b"boot banner\r\n")
-        await until(reader, "boot banner\r\n")
-        await until(other_reader, "boot banner\r\n")
-        writer.write("\x1da")
-        await writer.drain()
-        await until(reader, "CONTROL acquired")
-        writer.write("pwd\r")
-        await writer.drain()
-        await asyncio.sleep(0.1)
-        assert b"".join(device.writes) == b"pwd\r"
-        with pytest.raises(HubError):
-            await port.acquire("ai")
-        other_writer.write("\x1df")
-        await other_writer.drain()
-        await until(other_reader, "CONTROL acquired")
-        assert port.owner.startswith("human:")
-        writer.write("ignored")
-        other_writer.write("x")
-        await writer.drain()
-        await other_writer.drain()
-        await asyncio.sleep(0.1)
-        assert b"".join(device.writes) == b"pwd\rx"
+        assert b"".join(device.writes).endswith(b"\x1da\x03")
     finally:
+        operation.cancel()
+        await asyncio.gather(operation, return_exceptions=True)
         writer.close()
         other_writer.close()
 

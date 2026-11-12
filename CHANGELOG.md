@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0
+
+- Correct concurrency semantics: all MCP and Telnet clients can write immediately, including while other execute calls await output.
+- Removed control leases, forced takeover keys, watch-mode input dropping, command-response queues and idle-confirmation gates.
+- Execute uses independent cursors over shared RX and reports a warning and subsequent-write count; matching is not command-output isolation.
+- Telnet forwards control characters directly and normalizes CR LF / CR NUL. Token authentication remains, but no input acquisition step follows it.
+- Legacy v0.1 control RPCs are harmless compatibility no-ops; new MCP adapters expose only eight data/lifecycle tools.
+
 ## 0.1.0
 
 - Shared Windows COM daemon, authenticated loopback RPC and lightweight stdio MCP adapters.

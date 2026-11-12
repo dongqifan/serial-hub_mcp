@@ -4,19 +4,11 @@ import asyncio
 import base64
 import codecs
 import secrets
-import time
 import uuid
 
 import telnetlib3
 
 from .core import HubError, SerialPort
-
-
-HELP = (
-    "\r\n[hub] Ctrl+] then: a=acquire, f=force human takeover, "
-    "s=release, i=confirm idle, w=status, q=quit, ?=help.\r\n"
-    "[hub] Ctrl+] twice sends a literal Ctrl+]. Ordinary input in watch mode is discarded.\r\n"
-)
 
 
 async def read_line(reader, limit: int = 256) -> str:
@@ -88,56 +80,32 @@ class Terminals:
                 return
             authenticated = True
             port.clients.add(owner)
-            writer.write(f"\r\n[hub] Connected to {port.name} in WATCH mode.\r\n" + HELP)
+            writer.write(f"\r\n[hub] Connected to {port.name} in SHARED READ/WRITE mode.\r\n"
+                         "[hub] All clients can type immediately. Input/output may mix; no takeover keys.\r\n")
             await writer.drain()
             pump = asyncio.create_task(self._output(port, writer))
             # A failed/slow output consumer must also disconnect its input side.
             pump.add_done_callback(lambda _: writer.close())
-            escape = False
+            after_cr = True  # swallow optional LF/NUL left from token CRLF
             while True:
-                char = await reader.read(1)
-                if not char:
+                chunk = await reader.read(1024)
+                if not chunk:
                     break
-                if escape:
-                    escape = False
-                    if char == "q":
-                        break
+                text = []
+                for char in chunk:
+                    # Telnet NVT CR LF / CR NUL represent one Enter. Preserve
+                    # standalone NUL and all control keys (including Ctrl+]).
+                    if after_cr and char in ("\n", "\x00"):
+                        after_cr = False
+                        continue
+                    text.append(char)
+                    after_cr = char == "\r"
+                if text:
                     try:
-                        if char == "?":
-                            writer.write(HELP)
-                        elif char in ("a", "f"):
-                            state = await port.acquire(owner, 3600, force=char == "f")
-                            writer.write(f"\r\n[hub] CONTROL acquired; needs_confirmation={state['needs_confirmation']}.\r\n")
-                        elif char == "s":
-                            await port.release(owner)
-                            writer.write("\r\n[hub] WATCH mode. State is not automatically confirmed idle.\r\n")
-                        elif char == "i":
-                            # Human can confirm after observing the prompt even
-                            # when the previous owner's lease has expired.
-                            await port.acknowledge(owner)
-                            writer.write("\r\n[hub] Terminal state confirmed idle.\r\n")
-                        elif char == "w":
-                            state = port.snapshot()
-                            writer.write(f"\r\n[hub] owner={state['owner']}, uncertain={state['needs_confirmation']}, connected={state['connected']}\r\n")
-                        elif char == "\x1d":
-                            await port.send(owner, b"\x1d")
-                        else:
-                            writer.write("\r\n[hub] Unknown management key; use Ctrl+] ?.\r\n")
-                    except HubError as exc:
-                        writer.write(f"\r\n[hub] {exc}\r\n")
-                    await writer.drain()
-                elif char == "\x1d":
-                    escape = True
-                elif port.owner == owner:
-                    try:
-                        # Telnet CR NUL is one CR; discard its NUL padding.
-                        if char != "\x00":
-                            await port.send(owner, char.encode(self.encoding))
-                            port.deadline = time.monotonic() + 3600
+                        await port.send(owner, "".join(text).encode(self.encoding))
                     except HubError as exc:
                         writer.write(f"\r\n[hub] {exc}\r\n")
                         await writer.drain()
-                # Watch mode never forwards ordinary input to hardware.
         except (EOFError, TimeoutError, ConnectionError, OSError):
             pass
         finally:
@@ -146,11 +114,6 @@ class Terminals:
                 await asyncio.gather(pump, return_exceptions=True)
             if authenticated:
                 port.clients.discard(owner)
-                if port.owner == owner:
-                    try:
-                        await port.release(owner)
-                    except HubError:
-                        pass
             writer.close()
             self.connections.discard(writer)
             self.tasks.discard(task)

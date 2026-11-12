@@ -17,9 +17,10 @@ def create_mcp() -> FastMCP:
             "Use only the user's requested COM port and baud settings. No input is sent on open/read. "
             "Independent read cursors allow all sessions to observe the same RX data. "
             "Use execute with an observed literal terminal prompt as expect; matching text is NOT an exit code. "
-            "Never assume a timeout means idle; inspect output and explicitly acknowledge_state before recovery. "
-            "Human terminal takeover can interrupt commands. Do not retry interrupted writes automatically. "
-            "Use acquire_control/send/release_control for interactive work. Do not close a port other sessions use. "
+            "All MCP sessions and Telnet clients can write concurrently, without leases, takeover keys or command queues. "
+            "Input can mix in the single terminal. execute observes shared RX, NOT a private command response; "
+            "another client's output can satisfy expect. A timeout never proves idle; do not retry writes automatically. "
+            "Use send directly for interactive input. Do not close a port other sessions use. "
             "Raw text/base64 and local JSONL logs may contain credentials; do not publish them."
         ),
     )
@@ -62,7 +63,7 @@ def create_mcp() -> FastMCP:
 
     @mcp.tool()
     async def port_status(port: str, ctx: Context) -> dict:
-        """Inspect controller, lease, terminal clients, RX cursors and disconnect state."""
+        """Inspect shared input mode, active executions, terminal clients, RX cursors and disconnect state."""
         return await call(ctx, "port_status", {"port": port})
 
     @mcp.tool()
@@ -78,43 +79,25 @@ def create_mcp() -> FastMCP:
                                                "wait_seconds": wait_seconds, "encoding": encoding})
 
     @mcp.tool()
-    async def acquire_control(port: str, ctx: Context, lease_seconds: float = 120,
-                              wait_seconds: float = 0) -> dict:
-        """Acquire/renew exclusive input lease. Other readers remain unaffected; no forced AI takeover."""
-        return await call(ctx, "acquire_control", {"port": port, "lease_seconds": lease_seconds,
-                                                   "wait_seconds": wait_seconds})
-
-    @mcp.tool()
-    async def release_control(port: str, ctx: Context, confirmed_idle: bool = False) -> dict:
-        """Release your lease. Confirm idle only after observing the terminal; otherwise preserve uncertainty."""
-        return await call(ctx, "release_control", {"port": port, "confirmed_idle": confirmed_idle})
-
-    @mcp.tool()
-    async def acknowledge_state(port: str, confirmed_idle: bool, ctx: Context) -> dict:
-        """Explicitly confirm observed terminal is idle after timeout/manual input. Does not send anything.
-
-        Allowed only when no other controller/operation is active. This is not a reset command.
-        """
-        return await call(ctx, "acknowledge_state", {"port": port, "confirmed_idle": confirmed_idle})
-
-    @mcp.tool()
     async def send(port: str, text: str, ctx: Context, encoding: str = "utf-8") -> dict:
-        """Send exact text/control characters under your lease (no implicit newline). Leaves state uncertain."""
+        """Immediately send exact text/control characters (no implicit newline). No lease or takeover required."""
         return await call(ctx, "send", {"port": port, "text": text, "encoding": encoding})
 
     @mcp.tool()
     async def send_bytes(port: str, base64_data: str, ctx: Context) -> dict:
-        """Send exact base64-encoded bytes under your lease. Never resets, flushes or retries automatically."""
+        """Immediately send exact base64-encoded bytes. No lease; never resets, flushes or retries automatically."""
         return await call(ctx, "send", {"port": port, "base64": base64_data})
 
     @mcp.tool()
     async def execute(port: str, text: str, expect: str, ctx: Context, timeout: float = 10,
                       wait_seconds: float = 30, newline: str = "\r", encoding: str = "utf-8") -> dict:
-        """Queue one command transaction and collect RX until literal expect, timeout or human takeover.
+        """Send immediately and independently observe SHARED RX until literal expect or timeout.
 
-        Requires a known idle terminal; use a specific observed prompt (not command echo) for expect.
-        Result is bounded to 64 KiB; full RX remains in local logs. No automatic Ctrl+C on timeout.
-        Automatically releases only a lease acquired by this call, not a previously held lease.
+        Other MCP/Telnet clients may write at any time; no command/response queue or isolation.
+        Any client's output can satisfy expect, so a match is not proof your command completed.
+        additional_writes_observed counts subsequent writes from any source during this call.
+        Result is bounded to 64 KiB. No automatic Ctrl+C, retry or input gating after timeout.
+        wait_seconds is deprecated and ignored (v0.1 compatibility); no input lease exists.
         """
         return await call(ctx, "execute", {"port": port, "text": text, "expect": expect,
                                            "timeout": timeout, "wait_seconds": wait_seconds,
@@ -122,7 +105,7 @@ def create_mcp() -> FastMCP:
 
     @mcp.tool()
     async def close_port(port: str, ctx: Context) -> dict:
-        """Explicitly close idle unused port. Refuses other controllers, Telnet viewers or queued operations.
+        """Explicitly close idle unused port. Refuses Telnet clients or active execute calls.
 
         Passive MCP readers are not tracked as subscriptions: confirm nobody still needs capture first.
         """

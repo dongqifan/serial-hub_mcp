@@ -24,14 +24,10 @@ async def dispatch(hub: Hub, operation: str, args: dict, owner: str) -> dict:
     if operation == "read_output":
         return await port.read(args.get("cursor"), args.get("max_bytes", 16384),
                                args.get("wait_seconds", 0), args.get("encoding", "utf-8"))
-    if operation == "acquire_control":
-        return await port.acquire(owner, args.get("lease_seconds", 120), args.get("wait_seconds", 0))
-    if operation == "release_control":
-        return await port.release(owner, args.get("confirmed_idle", False))
-    if operation == "acknowledge_state":
-        if not args.get("confirmed_idle"):
-            raise HubError("Explicit confirmed_idle=true is required after observing terminal state")
-        return await port.acknowledge(owner)
+    if operation in ("acquire_control", "release_control", "acknowledge_state"):
+        # Compatibility for v0.1 adapters already running in other sessions.
+        # No locks, gating or confirmation exists in shared mode.
+        return {**port.snapshot(), "deprecated": "Control is no longer required; all clients can write immediately."}
     if operation == "send":
         if "base64" in args:
             data = base64.b64decode(args["base64"], validate=True)

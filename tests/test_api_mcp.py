@@ -20,13 +20,19 @@ async def test_api_auth_origin_and_hardware_access(rig):
         assert response.status_code == 200 and "COM3" in devices
         assert devices["COM3"].writes == []
         body = {"owner": "a", "operation": "send", "arguments": {"port": "COM3", "text": "x"}}
-        assert (await client.post("/rpc", json=body, headers=headers)).status_code == 409
+        assert (await client.post("/rpc", json=body, headers=headers)).status_code == 200
+        assert devices["COM3"].writes == [b"x"]
+        for op in ("acquire_control", "release_control", "acknowledge_state"):
+            body = {"owner": "legacy", "operation": op, "arguments": {"port": "COM3"}}
+            result = await client.post("/rpc", json=body, headers=headers)
+            assert result.status_code == 200 and result.json()["input_mode"] == "shared"
 
 
 async def test_mcp_tools_have_valid_schemas():
     mcp = create_mcp()
     tools = await mcp.list_tools()
     names = {t.name for t in tools}
-    assert {"list_ports", "open_port", "execute", "send", "read_output", "acquire_control"} <= names
+    assert {"list_ports", "open_port", "execute", "send", "read_output"} <= names
+    assert not {"acquire_control", "release_control", "acknowledge_state"} & names
     for tool in tools:
         assert "ctx" not in tool.inputSchema.get("properties", {})
