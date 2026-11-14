@@ -15,6 +15,12 @@ def create_mcp() -> FastMCP:
         instructions=(
             "Shared Windows COM ports. The daemon, not this MCP process, owns hardware. "
             "Use only the user's requested COM port and baud settings. No input is sent on open/read. "
+            "A successful write does not prove a shell received or ran a command: an askfirst console may consume "
+            "it while waiting for Enter. A stale prompt or echoed input is not proof of readiness. "
+            "Enter can execute pending input; inspect the current context and coordinate with other users first. "
+            "Before consequential commands, verify the target and current shell using an appropriate harmless "
+            "marked response when safe; shared output cannot prove attribution. "
+            "Afterwards verify the requested outcome independently; never automatically retry uncertain writes. "
             "Independent read cursors allow all sessions to observe the same RX data. "
             "Use execute with an observed literal terminal prompt as expect; matching text is NOT an exit code. "
             "All MCP sessions and Telnet clients can write concurrently, without leases, takeover keys or command queues. "
@@ -79,7 +85,11 @@ def create_mcp() -> FastMCP:
 
     @mcp.tool()
     async def send(port: str, text: str, ctx: Context, encoding: str = "utf-8") -> dict:
-        """Immediately send exact text/control characters (no implicit newline). No lease or takeover required."""
+        """Immediately send exact text/control characters (no implicit newline). No lease or takeover required.
+
+        A successful write does not prove a shell received or executed it; askfirst may consume input.
+        Enter can execute pending input. Inspect context and coordinate with other users before sending.
+        """
         return await call(ctx, "send", {"port": port, "text": text, "encoding": encoding})
 
     @mcp.tool()
@@ -92,6 +102,8 @@ def create_mcp() -> FastMCP:
                       wait_seconds: float = 30, newline: str = "\r", encoding: str = "utf-8") -> dict:
         """Send immediately and independently observe SHARED RX until literal expect or timeout.
 
+        A write may only activate an askfirst console, not execute the command; stale prompts and
+        echoed input do not prove readiness. Enter can execute pending input; inspect context first.
         Other MCP/Telnet clients may write at any time; no command/response queue or isolation.
         Any client's output can satisfy expect, so a match is not proof your command completed.
         additional_writes_observed counts subsequent writes from any source during this call.

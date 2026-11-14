@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Document console readiness and askfirst risks, including safe preflight and outcome verification guidance; no serial behavior changes.
+
 - Added global OpenCode /serial-ports, /serial-open, /serial-status and /serial-release command templates backed by existing MCP tools, plus a non-overwriting installation script.
 
 ## 0.4.0

@@ -35,3 +35,17 @@ async def test_mcp_tools_have_valid_schemas():
     assert not {"acquire_control", "release_control", "acknowledge_state"} & names
     for tool in tools:
         assert "ctx" not in tool.inputSchema.get("properties", {})
+
+
+async def test_mcp_guidance_warns_about_console_readiness():
+    mcp = create_mcp()
+    instructions = mcp._mcp_server.instructions
+    assert "askfirst" in instructions
+    assert "successful write does not prove" in instructions
+    assert "Enter can execute pending input" in instructions
+    assert "never automatically retry" in instructions
+    tools = {tool.name: tool.description for tool in await mcp.list_tools()}
+    for name in ("send", "execute"):
+        assert "askfirst" in tools[name]
+        assert "Enter can execute pending input" in tools[name]
+    assert "shared" in tools["execute"].lower()
