@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import uuid
 
 import httpx
@@ -8,10 +9,17 @@ from mcp.server.fastmcp import Context, FastMCP
 from .settings import api_url
 
 
+@asynccontextmanager
+async def http_lifespan(_server):
+    async with httpx.AsyncClient(timeout=httpx.Timeout(200, connect=3), trust_env=False) as client:
+        yield client
+
+
 def create_mcp() -> FastMCP:
     fallback = "client:" + uuid.uuid4().hex
     mcp = FastMCP(
         "Serial Hub",
+        lifespan=http_lifespan,
         instructions=(
             "Shared Windows COM ports. The daemon, not this MCP process, owns hardware. "
             "Use only the user's requested COM port and baud settings. No input is sent on open/read. "
@@ -23,7 +31,8 @@ def create_mcp() -> FastMCP:
             "Afterwards verify the requested outcome independently; never automatically retry uncertain writes. "
             "Independent read cursors allow all sessions to observe the same RX data. "
             "Use execute with an observed literal terminal prompt as expect; matching text is NOT an exit code. "
-            "All MCP sessions and Telnet clients can write concurrently, without leases, takeover keys or command queues. "
+            "All MCP sessions and Telnet clients can write without leases or waiting for a command response. "
+            "Each port queues complete write blocks in arrival order. "
             "Input can mix in the single terminal. execute observes shared RX, NOT a private command response; "
             "another client's output can satisfy expect. A timeout never proves idle; do not retry writes automatically. "
             "Use send directly for interactive input. Do not close a port other sessions use. "
@@ -38,13 +47,13 @@ def create_mcp() -> FastMCP:
         if not isinstance(owner, str) or not owner:
             owner = fallback
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(200, connect=3), trust_env=False) as client:
-                response = await client.post(api_url() + "/rpc",
-                                             json={"owner": owner, "operation": operation, "arguments": arguments})
-                data = response.json()
-                if response.is_error:
-                    raise ValueError(data.get("error", f"Hub HTTP {response.status_code}"))
-                return data
+            client = ctx.request_context.lifespan_context
+            response = await client.post(api_url() + "/rpc",
+                                         json={"owner": owner, "operation": operation, "arguments": arguments})
+            data = response.json()
+            if response.is_error:
+                raise ValueError(data.get("error", f"Hub HTTP {response.status_code}"))
+            return data
         except (OSError, httpx.HTTPError) as exc:
             raise ValueError("Serial Hub daemon is unavailable. Start 'serial-hub serve' first. " + str(exc)) from exc
 
@@ -85,22 +94,23 @@ def create_mcp() -> FastMCP:
 
     @mcp.tool()
     async def send(port: str, text: str, ctx: Context, encoding: str = "utf-8") -> dict:
-        """Immediately send exact text/control characters (no implicit newline). No lease or takeover required.
+        """Queue exact text/control characters (no implicit newline) and await the driver write.
 
         A successful write does not prove a shell received or executed it; askfirst may consume input.
         Enter can execute pending input. Inspect context and coordinate with other users before sending.
+        Do not retry an uncertain write after a timeout or cancellation.
         """
         return await call(ctx, "send", {"port": port, "text": text, "encoding": encoding})
 
     @mcp.tool()
     async def send_bytes(port: str, base64_data: str, ctx: Context) -> dict:
-        """Immediately send exact base64-encoded bytes. No lease; never resets, flushes or retries automatically."""
+        """Queue exact base64-encoded bytes and await the driver write; no automatic retry."""
         return await call(ctx, "send", {"port": port, "base64": base64_data})
 
     @mcp.tool()
     async def execute(port: str, text: str, expect: str, ctx: Context, timeout: float = 10,
                       wait_seconds: float = 30, newline: str = "\r", encoding: str = "utf-8") -> dict:
-        """Send immediately and independently observe SHARED RX until literal expect or timeout.
+        """Queue a write, then observe SHARED RX independently until literal expect or timeout.
 
         A write may only activate an askfirst console, not execute the command; stale prompts and
         echoed input do not prove readiness. Enter can execute pending input; inspect context first.

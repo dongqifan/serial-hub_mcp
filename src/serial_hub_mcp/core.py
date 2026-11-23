@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from functools import partial
 import json
 from logging.handlers import RotatingFileHandler
 import logging
@@ -46,35 +48,83 @@ class PortConfig:
             raise HubError("Invalid stopbits or flow_control")
 
 
-class Journal:
-    """Per-port RX/TX/event JSONL, bounded on disk; never goes to stdout."""
+class JournalHandler(RotatingFileHandler):
+    def handleError(self, record: logging.LogRecord) -> None:
+        raise
 
-    def __init__(self, directory: Path, name: str):
+
+class Journal:
+    def __init__(self, directory: Path, name: str, queue_size: int = 256):
         directory.mkdir(parents=True, exist_ok=True)
-        self.logger = logging.Logger(f"serial-hub.{name}.{uuid.uuid4().hex}")
-        self.logger.propagate = False
-        self.handler = RotatingFileHandler(
-            directory / f"{name}.jsonl", maxBytes=8 * 1024 * 1024,
-            backupCount=4, encoding="utf-8",
-        )
-        self.handler.setFormatter(logging.Formatter("%(message)s"))
-        self.logger.addHandler(self.handler)
         self.path = str(directory / f"{name}.jsonl")
+        self.epoch = uuid.uuid4().hex
+        self.handler = JournalHandler(self.path, maxBytes=8 * 1024 * 1024, backupCount=4, encoding="utf-8")
+        self.handler.setFormatter(logging.Formatter("%(message)s"))
+        self.pending: asyncio.Queue[tuple | None] = asyncio.Queue(maxsize=queue_size)
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"{name}-journal")
+        self.sequence = 0
+        self.dropped = 0
+        self.error: str | None = None
+        self.worker = asyncio.create_task(self._run())
+
+    def _event(self, kind: str, data: bytes, fields: dict) -> tuple:
+        self.sequence += 1
+        return self.sequence, datetime.now(timezone.utc).isoformat(), kind, data, fields
 
     def record(self, kind: str, data: bytes = b"", **fields) -> None:
-        self.logger.warning(json.dumps({
-            "time": datetime.now(timezone.utc).isoformat(), "kind": kind,
-            "base64": base64.b64encode(data).decode("ascii"), **fields,
-        }, ensure_ascii=True))
+        event = self._event(kind, data, fields)
+        try:
+            self.pending.put_nowait(event)
+        except asyncio.QueueFull:
+            self.dropped += 1
 
-    def close(self) -> None:
-        self.handler.close()
+    def _emit(self, timestamp: str, kind: str, data: bytes, **fields) -> None:
+        message = json.dumps({"time": timestamp, "kind": kind,
+                              "base64": base64.b64encode(data).decode("ascii"), **fields}, ensure_ascii=True)
+        self.handler.handle(logging.LogRecord("serial-hub", logging.INFO, "", 0, message, (), None))
+
+    async def _run(self) -> None:
+        loop = asyncio.get_running_loop()
+        last = 0
+        while (event := await self.pending.get()) is not None:
+            sequence, timestamp, kind, data, fields = event
+            try:
+                if sequence > last + 1:
+                    await loop.run_in_executor(self.executor, partial(
+                        self._emit, timestamp, "journal_gap", b"", epoch=self.epoch,
+                        first_sequence=last + 1, events_lost=sequence - last - 1,
+                    ))
+                    last = sequence - 1
+                await loop.run_in_executor(self.executor, partial(
+                    self._emit, timestamp, kind, data, epoch=self.epoch, journal_sequence=sequence, **fields,
+                ))
+                last = sequence
+            except OSError as exc:
+                self.dropped += 1
+                self.error = str(exc)
+            finally:
+                self.pending.task_done()
+        self.pending.task_done()
+
+    async def close(self) -> None:
+        await self.pending.put(self._event("close", b"", {}))
+        await self.pending.put(None)
+        await self.worker
+        await asyncio.get_running_loop().run_in_executor(self.executor, self.handler.close)
+        self.executor.shutdown(wait=False)
+
+
+@dataclass
+class WriteRequest:
+    owner: str
+    data: bytes
+    result: asyncio.Future[tuple[dict, str]]
 
 
 class SerialPort:
     def __init__(self, name: str, config: PortConfig, device, journal: Journal, capacity: int):
         self.name, self.config, self.device, self.journal = name, config, device, journal
-        self.epoch = uuid.uuid4().hex
+        self.epoch = journal.epoch
         self.capacity = capacity
         self.buffer = bytearray()
         self.start = self.end = 0
@@ -85,13 +135,20 @@ class SerialPort:
         self.telnet_port: int | None = None
         self.clients: set[str] = set()
         self.condition = asyncio.Condition()
+        self.writes: asyncio.Queue[WriteRequest | None] = asyncio.Queue(maxsize=64)
+        self.writing = False
+        self.reader_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"{name}-rx")
+        self.writer_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"{name}-tx")
+        journal.record("open", config=asdict(config))
         self.reader = asyncio.create_task(self._reader())
-        journal.record("open", config=asdict(config), epoch=self.epoch)
+        self.writer = asyncio.create_task(self._writer())
+        self.closing: asyncio.Task[None] | None = None
 
     async def _reader(self) -> None:
+        loop = asyncio.get_running_loop()
         try:
             while self.connected:
-                data = await asyncio.to_thread(self.device.read, 4096)
+                data = await loop.run_in_executor(self.reader_pool, self.device.read, 4096)
                 if data:
                     async with self.condition:
                         self.buffer.extend(data)
@@ -135,6 +192,8 @@ class SerialPort:
             "cursor_start": self.cursor(self.start), "cursor_end": self.cursor(self.end),
             "telnet": f"127.0.0.1:{self.telnet_port}" if self.telnet_port else None,
             "terminal_clients": len(self.clients), "log_path": self.journal.path,
+            "pending_writes": self.writes.qsize(), "write_in_progress": self.writing,
+            "journal_dropped_events": self.journal.dropped, "journal_error": self.journal.error,
         }
 
     async def read(self, cursor: str | None = None, max_bytes: int = 16384,
@@ -163,23 +222,50 @@ class SerialPort:
                 "connected": self.connected, "error": self.error,
             }
 
-    async def send(self, owner: str, data: bytes) -> dict:
+    async def _writer(self) -> None:
+        loop = asyncio.get_running_loop()
+        while (request := await self.writes.get()) is not None:
+            if request.result.cancelled():
+                continue
+            if not self.connected:
+                request.result.set_exception(HubError("Serial port is disconnected; queued bytes were not sent"))
+                continue
+            self.writing = True
+            cursor = self.cursor(self.end)
+            self.write_sequence += 1
+            self.journal.record("tx", request.data, source=request.owner, sequence=self.write_sequence)
+            error = None
+            try:
+                count = await loop.run_in_executor(self.writer_pool, self.device.write, request.data)
+                if count != len(request.data):
+                    raise HubError("Partial serial write; terminal state is unknown")
+            except Exception as exc:
+                error = exc
+                self.journal.record("tx_error", sequence=self.write_sequence, error=str(exc))
+            finally:
+                self.writing = False
+            if request.result.cancelled():
+                continue
+            if error is not None:
+                request.result.set_exception(HubError(f"Serial write failed; do not retry blindly: {error}"))
+            else:
+                request.result.set_result(({"written": count, **self.snapshot()}, cursor))
+
+    async def _send(self, owner: str, data: bytes) -> tuple[dict, str]:
         if not 1 <= len(data) <= 65536:
             raise HubError("Send 1..65536 bytes")
         if not self.connected:
             raise HubError("Serial port is disconnected")
-        self.write_sequence += 1
-        self.journal.record("tx", data, source=owner, sequence=self.write_sequence)
+        result = asyncio.get_running_loop().create_future()
         try:
-            # A single synchronous, bounded write cannot interleave its bytes
-            # with another write. This is NOT a command/response lock: everyone
-            # can write again immediately while other clients await RX.
-            count = self.device.write(data)
-            if count != len(data):
-                raise HubError("Partial serial write; terminal state is unknown")
-        except Exception as exc:
-            raise HubError(f"Serial write failed; do not retry blindly: {exc}") from exc
-        return {"written": len(data), **self.snapshot()}
+            self.writes.put_nowait(WriteRequest(owner, data, result))
+        except asyncio.QueueFull:
+            raise HubError("Serial write queue is full; bytes were not sent") from None
+        return await result
+
+    async def send(self, owner: str, data: bytes) -> dict:
+        result, _ = await self._send(owner, data)
+        return result
 
     async def execute(self, owner: str, text: str, expect: str, timeout: float = 10,
                       wait_seconds: float = 30, newline: str = "\r",
@@ -196,10 +282,9 @@ class SerialPort:
         output = bytearray()
         lost = 0
         outcome = "timeout"
-        cursor = self.cursor(self.end)
         self.active_executions += 1
         try:
-            sent = await self.send(owner, data)
+            sent, cursor = await self._send(owner, data)
             sequence = sent["write_sequence"]
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
@@ -231,19 +316,23 @@ class SerialPort:
                 "warning": "Shared terminal output; a match is not proof this command finished or succeeded."}
 
     async def close(self) -> None:
-        self.connected = False
-        # Let the bounded serial read finish before closing its handle; cancelling
-        # to_thread does not stop the underlying thread.
-        try:
-            await asyncio.wait_for(asyncio.shield(self.reader), timeout=1.5)
-        except (TimeoutError, asyncio.CancelledError):
-            self.reader.cancel()
-            await asyncio.gather(self.reader, return_exceptions=True)
-        await asyncio.to_thread(self.device.close)
-        self.journal.record("close")
-        self.journal.close()
+        if self.closing is None:
+            self.connected = False
+            self.closing = asyncio.create_task(self._close())
+        await asyncio.shield(self.closing)
+
+    async def _close(self) -> None:
         async with self.condition:
             self.condition.notify_all()
+        await self.writes.put(None)
+        # Wait for both driver calls to finish before releasing the handle.
+        await asyncio.gather(self.reader, self.writer)
+        try:
+            await asyncio.to_thread(self.device.close)
+        finally:
+            self.reader_pool.shutdown(wait=False)
+            self.writer_pool.shutdown(wait=False)
+            await self.journal.close()
 
 
 class Hub:
@@ -311,6 +400,8 @@ class Hub:
             port = self.get(name)
             if port.clients or port.active_executions:
                 raise HubError("Port has terminal clients or active execute calls")
+            if port.writing or not port.writes.empty():
+                raise HubError("Port has pending serial writes")
             if self.terminals:
                 await self.terminals.stop_port(port.name)
             await port.close()

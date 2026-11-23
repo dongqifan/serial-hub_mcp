@@ -1,11 +1,13 @@
 import asyncio
 import base64
 import json
+from functools import partial
 from pathlib import Path
+import threading
 
 import pytest
 
-from serial_hub_mcp.core import HubError, PortConfig, port_name
+from serial_hub_mcp.core import HubError, Journal, PortConfig, port_name
 
 
 async def receive(port, device, data):
@@ -183,6 +185,111 @@ async def test_partial_write_does_not_block_future_writes(rig):
     assert device.writes == [b"x"]
 
 
+async def test_blocked_write_does_not_block_receive_or_another_port(rig):
+    hub, devices = rig
+    for name in ("COM3", "COM8"):
+        await hub.open(name, PortConfig())
+    port = hub.get("COM3")
+    release = threading.Event()
+    started = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    write = devices["COM3"].write
+
+    def block_write(data):
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(5)
+        return write(data)
+
+    devices["COM3"].write = block_write
+    sending = asyncio.create_task(port.send("a", b"first"))
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        with pytest.raises(HubError, match="pending serial writes"):
+            await hub.close_port("COM3", "a")
+        cursor = port.cursor(port.end)
+        devices["COM3"].input.put(b"receive while writing")
+        assert (await port.read(cursor, wait_seconds=1))["text"] == "receive while writing"
+        assert (await asyncio.wait_for(hub.get("COM8").send("b", b"other port"), 1))["written"] == 10
+        assert not sending.done()
+    finally:
+        release.set()
+        await sending
+
+
+async def test_writer_queue_is_bounded_and_skips_cancelled_pending_input(rig):
+    hub, devices = rig
+    await hub.open("COM3", PortConfig())
+    port = hub.get("COM3")
+    release = threading.Event()
+    started = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    write = devices["COM3"].write
+
+    def block_first(data):
+        if data == b"first":
+            loop.call_soon_threadsafe(started.set)
+            assert release.wait(5)
+        return write(data)
+
+    devices["COM3"].write = block_first
+    first = asyncio.create_task(port.send("a", b"first"))
+    pending = []
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        blocks = [str(i).encode() for i in range(port.writes.maxsize)]
+        pending = [asyncio.create_task(port.send("b", block)) for block in blocks]
+        await asyncio.sleep(0)
+        with pytest.raises(HubError, match="queue is full"):
+            await port.send("c", b"rejected")
+        first.cancel()
+        pending[0].cancel()
+        cancelled = await asyncio.gather(first, pending[0], return_exceptions=True)
+        assert all(isinstance(result, asyncio.CancelledError) for result in cancelled)
+        assert port.writing and not devices["COM3"].writes
+    finally:
+        release.set()
+        await asyncio.gather(first, *pending, return_exceptions=True)
+    assert devices["COM3"].writes == [b"first", *blocks[1:]]
+    assert port.write_sequence == len(blocks)
+
+
+async def test_busy_journal_keeps_rx_available_and_marks_gaps(rig, monkeypatch):
+    hub, devices = rig
+    monkeypatch.setattr("serial_hub_mcp.core.Journal", partial(Journal, queue_size=1))
+    await hub.open("COM3", PortConfig())
+    port = hub.get("COM3")
+    journal = port.journal
+    await asyncio.wait_for(journal.pending.join(), 2)
+    release = threading.Event()
+    started = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    emit = journal._emit
+
+    def block_emit(*args, **fields):
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(5)
+        emit(*args, **fields)
+
+    journal._emit = block_emit
+    try:
+        await receive(port, devices["COM3"], b"a")
+        await asyncio.wait_for(started.wait(), 2)
+        await receive(port, devices["COM3"], b"b")
+        await receive(port, devices["COM3"], b"c")
+        assert (await port.read())["text"] == "abc"
+        assert port.snapshot()["journal_dropped_events"] == 1
+    finally:
+        release.set()
+    await asyncio.wait_for(journal.pending.join(), 2)
+    await receive(port, devices["COM3"], b"d")
+    await asyncio.wait_for(journal.pending.join(), 2)
+    events = [json.loads(line) for line in Path(journal.path).read_text().splitlines()]
+    gap, last = events[-2:]
+    assert gap["kind"] == "journal_gap" and gap["events_lost"] == 1
+    assert last["epoch"] == gap["epoch"] == port.epoch and last["end"] == 4
+    assert base64.b64decode(last["base64"]) == b"d"
+
+
 async def test_journal_contains_exact_bytes_and_source(rig):
     hub, devices = rig
     await hub.open("COM3", PortConfig())
@@ -190,6 +297,7 @@ async def test_journal_contains_exact_bytes_and_source(rig):
     raw = b"\xff\x00\r\n"
     await receive(port, devices["COM3"], raw)
     await port.send("source-a", raw)
+    await asyncio.wait_for(port.journal.pending.join(), 2)
     events = [json.loads(line) for line in Path(port.journal.path).read_text().splitlines()]
     assert [base64.b64decode(x["base64"]) for x in events if x["kind"] in ("rx", "tx")] == [raw, raw]
     assert next(x for x in events if x["kind"] == "tx")["source"] == "source-a"

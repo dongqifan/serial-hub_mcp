@@ -33,7 +33,15 @@ async def test_two_real_mcp_clients_share_serial_and_session_identity(rig, monke
     sock.listen()
     port = sock.getsockname()[1]
     monkeypatch.setenv("SERIAL_HUB_API_PORT", str(port))
-    server = uvicorn.Server(uvicorn.Config(create_app(hub), log_level="error", access_log=False))
+    app = create_app(hub)
+    sources = []
+
+    async def trace(scope, receive, send):
+        if scope["type"] == "http":
+            sources.append(scope["client"])
+        await app(scope, receive, send)
+
+    server = uvicorn.Server(uvicorn.Config(trace, log_level="error", access_log=False))
     task = asyncio.create_task(server.serve(sockets=[sock]))
     try:
         for _ in range(100):
@@ -80,6 +88,11 @@ async def test_two_real_mcp_clients_share_serial_and_session_identity(rig, monke
                 await session.initialize()
                 sessions.append(session)
             a, b = sessions
+            before = len(sources)
+            for _ in range(3):
+                result_data(await a.call_tool("list_ports", {}))
+            assert len(sources[before:]) == 3
+            assert len(set(sources[before:])) == 1
             meta_a = {"ai.opencode/sessionID": "session-a"}
             meta_b = {"ai.opencode/sessionID": "session-b"}
             await a.call_tool("open_port", {"port": "COM3"}, meta=meta_a)
@@ -95,7 +108,9 @@ async def test_two_real_mcp_clients_share_serial_and_session_identity(rig, monke
             rb = result_data(await b.call_tool("read_output", {"port": "COM3"}, meta=meta_b))
             assert ra["text"] == rb["text"] == "/\r\nroot# "
             assert set(devices["COM3"].writes) == {b"from-a\r", b"from-b\r"}
-            events = [json.loads(line) for line in Path(hub.get("COM3").journal.path).read_text().splitlines()]
+            journal = hub.get("COM3").journal
+            await asyncio.wait_for(journal.pending.join(), 2)
+            events = [json.loads(line) for line in Path(journal.path).read_text().splitlines()]
             assert {x["source"] for x in events if x["kind"] == "tx"} == {"mcp:session-a", "mcp:session-b"}
         # Ending all MCP processes does not stop the shared serial connection.
         assert hub.get("COM3").connected and not devices["COM3"].closed
