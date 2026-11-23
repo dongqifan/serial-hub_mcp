@@ -87,6 +87,7 @@ def main() -> None:
     daemon.add_argument("--telnet-base", type=int, default=2300)
     daemon.add_argument("--encoding", default="utf-8", help="Xshell text encoding (MCP can choose per call)")
     commands.add_parser("mcp", help="Run lightweight stdio MCP adapter; never opens hardware itself")
+    commands.add_parser("gui", help="Open the desktop controller; never claims COM on startup")
     status = commands.add_parser("status", help="Show daemon inventory or one shared COM's details (JSON)")
     status.add_argument("port", nargs="?", type=com_argument)
     ports = commands.add_parser("ports", help="List COM ports and this daemon's occupancy")
@@ -108,6 +109,9 @@ def main() -> None:
             asyncio.run(serve(args))
         except KeyboardInterrupt:
             pass
+    elif args.command == "gui":
+        from .board_console import main as gui_main
+        gui_main()
     elif args.command == "mcp":
         from .mcp_server import main as mcp_main
         mcp_main()

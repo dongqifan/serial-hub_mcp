@@ -14,6 +14,7 @@ try {
     & $exe -m pytest -q
     if ($LASTEXITCODE -ne 0) { throw 'Tests failed; installation is not verified' }
 } finally { Pop-Location }
-Write-Host "Installed. Start daemon: & '$root\.venv\Scripts\serial-hub.exe' serve"
+Write-Host "Installed. To manage ports, double-click '$root\Serial Hub.cmd'."
+Write-Host "Console alternative: & '$root\.venv\Scripts\serial-hub.exe' gui"
 Write-Host "MCP command: $root\.venv\Scripts\python.exe -m serial_hub_mcp.mcp_server"
 Write-Host 'OpenCode configuration and startup tasks are NOT modified by this installer.'
