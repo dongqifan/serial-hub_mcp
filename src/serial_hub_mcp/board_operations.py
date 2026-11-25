@@ -1,6 +1,7 @@
-"""Translate board profiles to serial operations; credentials never enter RPC or AI text."""
+"""Translate board profiles to serial operations; serial RPC never receives credentials."""
 from __future__ import annotations
 
+from . import board_secrets
 from .project_actions import READY, claim_group, member_state, release_ports
 
 __all__ = ['board_state', 'claim_boards', 'board_hint', 'release_ports']
@@ -20,19 +21,12 @@ def claim_boards(rpc, boards):
     return inventory, '\n'.join([report, *skipped])
 
 
-def tftp_lines(board):
-    for target in board['tftp_targets']:
-        host = target['host']
-        address = f'[{host}]' if ':' in host else host
-        yield f"{target['soc']}：{address}:{target['port']}"
-
-
-def board_hint(project, boards, inventory):
-    # Explicit allow-list: neither ciphertext nor login identifiers belong in a handoff.
+def board_hint(project, boards, inventory, *, running_services=None):
+    # Build the whole handoff before touching the clipboard.
     lines = [f'项目：{project}']
-    opened = {p['port']: p for p in inventory['open']}
+    opened = {p['port']: p for p in inventory['open']} if inventory is not None else {}
     for b in boards:
-        state = board_state(b, inventory)
+        state = board_state(b, inventory) if inventory is not None or not b['port'] else '状态未知'
         lines.append(f"\n开发板：{b['name']}")
         if state == READY:
             live = opened[b['port']]
@@ -40,12 +34,25 @@ def board_hint(project, boards, inventory):
             if live.get('telnet'):
                 lines.append(f"本机 Telnet：{live['telnet']}")
         else:
-            lines.append(f"串口：{b['port'] or '无'}（{state}），跳过串口操作。")
+            lines.append(f"串口：{b['port'] or '无'}（{state}）。")
         if b['web_url']:
             lines.append(f"Web 登录地址（配置值）：{b['web_url']}")
-        if b['tftp_targets']:
-            lines.append('固件 TFTP（配置值，UDP）：')
-            lines.extend(tftp_lines(b))
-    lines.append('\n仅对已就绪的串口使用已注册的 serial_hub MCP；先用 port_status 核对，再用 read_output 读取。'
-                 '不要打开或释放串口、发送数据、尝试登录或升级固件。')
+        if b['copy_login']:
+            for key, label in (('serial', '串口'), ('web', 'Web ')):
+                if b[key + '_user']:
+                    lines.append(f"{label}用户名：{b[key + '_user']}")
+                if b[key + '_secret']:
+                    try:
+                        password = board_secrets.reveal(b[key + '_secret'])
+                    except Exception:
+                        raise ValueError(f"无法解密“{b['name']}”的{label}密码。本次未复制，请重新保存密码或取消勾选复制登录信息。") from None
+                    lines.append(f'{label}密码：{password}')
+        for service in b['tftp_servers']:
+            key = b['id'], service['name']
+            status = ('运行状态未知' if running_services is None else
+                      '本窗口运行中' if key in running_services else '本窗口未启动')
+            lines.append(f"本机只读 TFTP · {service['name']}：{service['ip']}:{service['port']} / UDP"
+                         f"（{status}），固件目录：{service['directory']}")
+        if b['ai_prompt']:
+            lines.extend(('本板使用者给 AI 的提示：', b['ai_prompt']))
     return '\n'.join(lines)

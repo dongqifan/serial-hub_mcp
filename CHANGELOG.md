@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Discover a local development board project with one stable project ID via MCP. Board-scoped serial tools share the existing capture and require a matching board binding and connection. GUI project editing, MCP setup, service controls and window-owned TFTP reporting remain separate from Agent operations.
+
 - Document console readiness and askfirst risks, including safe preflight and outcome verification guidance; no serial behavior changes.
 
 - Added global OpenCode /serial-ports, /serial-open, /serial-status and /serial-release command templates backed by existing MCP tools, plus a non-overwriting installation script.

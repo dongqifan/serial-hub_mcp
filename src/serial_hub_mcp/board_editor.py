@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import ttk
+from tkinter import filedialog, ttk
 
 from . import board_secrets, boards
+from .dialog_layout import show_centered
 
 
 class PasswordField(ttk.Frame):
@@ -74,14 +75,20 @@ class PasswordField(ttk.Frame):
         super().destroy()
 
 
-class TftpTargets(ttk.Frame):
-    """Local edit buffer: no row is written back to the board until Save."""
+class TftpServers(ttk.Frame):
+    """Edit per-board local services without starting any listeners."""
+    columns = (('name', '服务名称', 13), ('ip', '绑定接口 IPv4', 16), ('port', 'UDP 端口', 8),
+               ('directory', '只读固件目录', 23))
+    defaults = {'name': '', 'ip': '127.0.0.1', 'port': 69, 'directory': ''}
+    add_text, list_name, wide_column = '添加本机服务', '本机 TFTP 配置', 3
+    sheet_width = 655
+
     def __init__(self, parent, targets):
         super().__init__(parent)
         self.rows = []
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
-        self.canvas = tk.Canvas(self, width=480, height=140, highlightthickness=0)
+        self.canvas = tk.Canvas(self, width=self.sheet_width, height=140, highlightthickness=0)
         self.canvas.grid(row=0, column=0, sticky='nsew')
         bar = ttk.Scrollbar(self, orient='vertical', command=self.canvas.yview)
         bar.grid(row=0, column=1, sticky='ns')
@@ -90,33 +97,42 @@ class TftpTargets(ttk.Frame):
         sheet_id = self.canvas.create_window(0, 0, window=self.sheet, anchor='nw')
         self.canvas.bind('<Configure>', lambda e: self.canvas.itemconfigure(sheet_id, width=e.width))
         self.sheet.bind('<Configure>', lambda _: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
-        self.sheet.columnconfigure(1, weight=1)
-        for i, label in enumerate(('SoC 名称', 'TFTP 主机名或 IP', 'UDP 端口')):
+        self.sheet.columnconfigure(self.wide_column, weight=1)
+        for i, (_, label, _) in enumerate(self.columns):
             ttk.Label(self.sheet, text=label).grid(row=0, column=i, sticky='w', padx=3)
         for target in targets:
             self.add(target)
-        ttk.Button(self, text='添加 SoC', command=self.add).grid(row=1, column=0, sticky='w', pady=(8, 0))
+        ttk.Button(self, text=self.add_text, command=self.add).grid(row=1, column=0, sticky='w', pady=(8, 0))
 
     def add(self, target=None):
-        data = target or {'soc': '', 'host': '', 'port': 69}
+        data = target or self.defaults
         index = self.sheet.grid_size()[1]
         entries = {}
-        for col, (key, width) in enumerate((('soc', 14), ('host', 23), ('port', 8))):
+        for col, (key, _, width) in enumerate(self.columns):
             var = tk.StringVar(self, str(data[key]))
             entry = ttk.Entry(self.sheet, width=width, textvariable=var)
             entry.grid(row=index, column=col, sticky='ew', padx=3, pady=2)
             entries[key] = (var, entry)
+            if key == 'directory':
+                browse = ttk.Button(self.sheet, text='选择…', width=6, command=lambda v=var: self.browse(v))
+                browse.grid(row=index, column=len(self.columns), padx=3)
+                browse.bind('<FocusIn>', lambda e: self.see(e.widget))
             entry.bind('<FocusIn>', lambda e: self.see(e.widget))
         remove = ttk.Button(self.sheet, text='移除', width=5, command=lambda: self.remove(row))
-        remove.grid(row=index, column=3, padx=3)
+        remove.grid(row=index, column=len(self.columns) + ('directory' in entries), padx=3)
         remove.bind('<FocusIn>', lambda e: self.see(e.widget))
         row = entries, remove
         self.rows.append(row)
         if target is None:
             self.update_idletasks()
             self.canvas.yview_moveto(1)
-            entries['soc'][1].focus_set()
+            next(iter(entries.values()))[1].focus_set()
         return row
+
+    def browse(self, var):
+        folder = filedialog.askdirectory(parent=self.winfo_toplevel(), title='选择专用固件目录', mustexist=True)
+        if folder:
+            var.set(folder)
 
     def see(self, widget):
         top = self.canvas.canvasy(0)
@@ -127,10 +143,9 @@ class TftpTargets(ttk.Frame):
 
     def remove(self, row):
         self.rows.remove(row)
-        entries, button = row
-        for _, widget in entries.values():
+        _, button = row
+        for widget in self.sheet.grid_slaves(row=int(button.grid_info()['row'])):
             widget.destroy()
-        button.destroy()
 
     def values(self):
         result = []
@@ -139,7 +154,7 @@ class TftpTargets(ttk.Frame):
             try:
                 data['port'] = int(data['port'])
             except ValueError:
-                raise ValueError(f'第 {i} 条 TFTP 配置：UDP 端口必须填写整数。') from None
+                raise ValueError(f'第 {i} 条{self.list_name}：UDP 端口必须填写整数。') from None
             result.append(data)
         return result
 
@@ -147,6 +162,7 @@ class TftpTargets(ttk.Frame):
 class BoardEditor(tk.Toplevel):
     def __init__(self, parent, board, available):
         super().__init__(parent)
+        self.withdraw()
         self.transient(parent)
         self.title('开发板资料')
         self.board = dict(board)
@@ -162,13 +178,13 @@ class BoardEditor(tk.Toplevel):
         notebook.grid(row=1, column=0, columnspan=2, sticky='nsew', pady=(12, 4))
         body.rowconfigure(1, weight=1)
         tabs = []
-        for title in ('串口登录', 'Web 登录', '固件 TFTP'):
+        for title in ('串口登录', 'Web 登录', '本机 TFTP 服务'):
             page = ttk.Frame(notebook, padding=12)
             page.columnconfigure(1, weight=1)
             notebook.add(page, text=title)
             tabs.append(page)
         notebook.enable_traversal()
-        serial, web, tftp = tabs
+        serial, web, local = tabs
         ports = sorted(set(available), key=lambda n: (len(n), n))
         self.field(serial, 0, '串口（可选）', 'port', values=ports)
         self.field(serial, 1, '波特率', 'baudrate', values=(9600, 19200, 38400, 57600, 115200, 230400, 921600))
@@ -179,10 +195,11 @@ class BoardEditor(tk.Toplevel):
         self.password(web, 2, '密码', 'web_secret')
         ttk.Label(web, text='填写 http:// 或 https:// 地址；账号密码请单独填写。').grid(
             row=3, column=0, columnspan=2, sticky='w', pady=6)
-        self.targets = TftpTargets(tftp, board['tftp_targets'])
-        self.targets.grid(row=0, column=0, columnspan=2, sticky='nsew')
-        tftp.rowconfigure(0, weight=1)
-        ttk.Label(tftp, text='每行对应一个 SoC。保存资料不会传输固件。').grid(
+        self.servers = TftpServers(local, board['tftp_servers'])
+        self.servers.grid(row=0, column=0, columnspan=2, sticky='nsew')
+        local.rowconfigure(0, weight=1)
+        ttk.Label(local, text='TFTP 无身份验证，只选择专用固件目录。127.0.0.1 仅供本机测试；'
+                  '供开发板下载时请填写直连网卡的 IPv4 地址。保存后仍需手动启动。', wraplength=610).grid(
             row=1, column=0, columnspan=2, sticky='w', pady=6)
         notebook.bind('<<NotebookTabChanged>>', lambda _: [pw.hide() for pw in self.passwords.values()])
         ttk.Label(body, textvariable=self.error, foreground='#8d3432', wraplength=440).grid(
@@ -192,6 +209,7 @@ class BoardEditor(tk.Toplevel):
         ttk.Button(footer, text='保存开发板', command=self.save).pack(side='right')
         ttk.Button(footer, text='取消', command=self.destroy).pack(side='right', padx=5)
         self.bind('<Escape>', lambda _: self.destroy())
+        show_centered(self, parent)
         name_entry.focus_set()
 
     def field(self, page, row, label, key, values=None):
@@ -215,7 +233,7 @@ class BoardEditor(tk.Toplevel):
             self.error.set('波特率必须填写整数。')
             return
         try:
-            board['tftp_targets'] = self.targets.values()
+            board['tftp_servers'] = self.servers.values()
             board = boards.normalize_board(board)
         except ValueError as exc:
             # normalize_board uses fixed field-specific messages, never input values.

@@ -22,7 +22,7 @@ def editor():
         pytest.skip(f'No Tk display: {exc}')
     board = dict(id=uuid.uuid4().hex, name='板 A', port='', baudrate=115200, serial_user='',
                  serial_secret=envelope(b'one'), web_url='', web_user='', web_secret=envelope(b'two'),
-                 tftp_targets=[])
+                 tftp_servers=[], copy_login=True, ai_prompt=board_editor.boards.DEFAULT_AI_PROMPT)
     dialog = board_editor.BoardEditor(root, board, ['COM2', 'COM3'])
     root.update()
     try:
@@ -81,43 +81,15 @@ def test_backend_error_reveals_no_sensitive_text(editor, monkeypatch):
     assert 'SAMPLE_' not in str(editor.board)
 
 
-def test_soc_targets_roundtrip_and_cancel(editor):
-    root = editor.master
-    first = {'soc': '主控', 'host': 'fw.test', 'port': 69}
-    second = {'soc': '网络处理器', 'host': '2001:db8::1', 'port': 1069}
-    entries, _ = editor.targets.add()
-    assert entries['port'][0].get() == '69'
-    for key in ('soc', 'host'):
-        entries[key][0].set(first[key])
-    editor.targets.add(second)
-    editor.save()
-    saved = editor.result
-    assert saved['tftp_targets'] == [first, second]
-
-    reopened = board_editor.BoardEditor(root, saved, [])
-    entries, remove = reopened.targets.rows[0]
-    entries['host'][0].set('different.test')
-    remove.invoke()
-    assert reopened.targets.values() == [second]
-    reopened.destroy()
-    assert reopened.result is None and saved['tftp_targets'] == [first, second]
-
-    empty = board_editor.BoardEditor(root, saved, [])
-    for _, remove in list(empty.targets.rows):
-        remove.invoke()
-    empty.save()
-    assert empty.result['tftp_targets'] == []
-
-
-def test_invalid_port_keeps_all_soc_rows_editable(editor):
-    first = {'soc': '主控', 'host': 'first.test', 'port': 69}
-    editor.targets.add(first)
-    row, _ = editor.targets.add({'soc': '从控', 'host': 'second.test', 'port': 'bad'})
+def test_invalid_port_keeps_all_local_rows_editable(editor, tmp_path):
+    first = {'name': '主控', 'ip': '127.0.0.1', 'port': 69, 'directory': str(tmp_path / 'firmware')}
+    editor.servers.add(first)
+    row, _ = editor.servers.add(dict(first, name='从控', port='bad'))
     editor.save()
     assert editor.result is None and '第 2 条' in editor.error.get()
     row['port'][0].set('1069')
     editor.save()
-    assert editor.result['tftp_targets'] == [first, {'soc': '从控', 'host': 'second.test', 'port': 1069}]
+    assert editor.result['tftp_servers'] == [first, dict(first, name='从控', port=1069)]
 
 
 def test_cancel_ignores_password_changes(editor):
@@ -125,3 +97,22 @@ def test_cancel_ignores_password_changes(editor):
     editor.destroy()
     assert editor.result is None
     assert editor.board['web_secret'] == envelope(b'two')
+
+
+def test_local_server_editor_browse_add_remove_and_cancel(editor, monkeypatch, tmp_path):
+    first = {'name': '主控', 'directory': str(tmp_path / 'firmware'), 'port': 69, 'ip': '127.0.0.1'}
+    entries, _ = editor.servers.add()
+    assert entries['ip'][0].get() == first['ip'] and entries['port'][0].get() == '69'
+    entries['name'][0].set(first['name'])
+    monkeypatch.setattr(board_editor.filedialog, 'askdirectory', lambda **_: first['directory'])
+    editor.servers.browse(entries['directory'][0])
+    second = dict(first, name='无线', port=1069)
+    editor.servers.add(second)
+    editor.save()
+    assert editor.result['tftp_servers'] == [first, second]
+    assert 'tftp_targets' not in editor.result
+    again = board_editor.BoardEditor(editor.master, editor.result, [])
+    again.servers.rows[0][1].invoke()
+    assert again.servers.values() == [second]
+    again.destroy()
+    assert again.result is None and editor.result['tftp_servers'] == [first, second]

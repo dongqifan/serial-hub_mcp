@@ -6,12 +6,14 @@ import json
 from pathlib import Path
 import socket
 import sys
+from types import SimpleNamespace
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 import uvicorn
 import pytest
 
+from serial_hub_mcp import boards
 from serial_hub_mcp.daemon import create_app
 
 
@@ -118,6 +120,64 @@ async def test_two_real_mcp_clients_share_serial_and_session_identity(rig, monke
             assert old_file.read_bytes() == b"\xffinvalid legacy token"
         else:
             assert not old_file.parent.exists()
+    finally:
+        server.should_exit = True
+        await asyncio.wait_for(task, 10)
+        sock.close()
+
+
+async def test_agent_uses_only_a_project_id_to_discover_and_talk_to_its_board(rig, monkeypatch, tmp_path):
+    hub, devices = rig
+    monkeypatch.setenv('SERIAL_HUB_HOME', str(tmp_path / 'profiles'))
+    monkeypatch.setattr('serial_hub_mcp.core.list_ports.comports', lambda: [
+        SimpleNamespace(device='COM7', description='test fixture', hwid='fake')])
+    project = boards.new_project('考场 A')
+    project.boards.append(dict(boards.new_board(), name='DUT', port='COM7',
+                               web_url='http://board.test', serial_user='account-not-for-agents'))
+    boards.save_catalog([project], expected_revision=boards.load_catalog().revision)
+    sock = socket.socket()
+    sock.bind(('127.0.0.1', 0))
+    sock.listen()
+    server = uvicorn.Server(uvicorn.Config(create_app(hub), log_level='error', access_log=False))
+    task = asyncio.create_task(server.serve(sockets=[sock]))
+    try:
+        async with asyncio.timeout(5):
+            while not server.started:
+                await asyncio.sleep(.01)
+        spec = StdioServerParameters(command=sys.executable, args=['-I', '-m', 'serial_hub_mcp.mcp_server'],
+                                     env={'SERIAL_HUB_API_PORT': str(sock.getsockname()[1])})
+        async with stdio_client(spec) as streams, ClientSession(*streams) as client:
+            await client.initialize()
+            names = {t.name for t in (await client.list_tools()).tools}
+            assert {'get_project', 'open_board_serial', 'read_board_output', 'send_board_text', 'execute_board'} <= names
+            assert not any(t.startswith('console_') for t in names)
+            template = 'board-console://projects/{project_id}'
+            assert template in {r.uriTemplate for r in (await client.list_resource_templates()).resourceTemplates}
+            ids = {'project_id': project.id}
+            info = result_data(await client.call_tool('get_project', ids))
+            resource = await client.read_resource(template.format(**ids))
+            assert json.loads(resource.contents[0].text) == info
+            assert 'account-not-for-agents' not in resource.contents[0].text
+            assert not devices
+            item, = info['boards']
+            ids['board_id'] = item['board_id']
+            opened = result_data(await client.call_tool('open_board_serial',
+                {**ids, 'binding_id': item['serial']['binding_id']}))
+            assert devices['COM7'].writes == []
+            handle = {**ids, 'connection_id': opened['connection_id']}
+            devices['COM7'].responder = lambda data: devices['COM7'].input.put(b'ready\r\n# ')
+            match = result_data(await client.call_tool('execute_board',
+                {**handle, 'text': 'test', 'expect': '\r\n# '}))
+            assert match['outcome'] == 'matched' and devices['COM7'].writes == [b'test\r']
+            output = result_data(await client.call_tool('read_board_output',
+                {**handle, 'cursor': opened['cursor_end']}))
+            assert output['text'] == 'ready\r\n# '
+            catalog = boards.load_catalog()
+            catalog.by_id(project.id).name = '考场 B'
+            boards.save_catalog(catalog.projects, expected_revision=catalog.revision)
+            updated = json.loads((await client.read_resource(template.format(**ids))).contents[0].text)
+            assert updated['name'] == '考场 B' and updated['boards'][0]['board_id'] == ids['board_id']
+            assert (await client.call_tool('get_project', {'project_id': 'invalid'})).isError
     finally:
         server.should_exit = True
         await asyncio.wait_for(task, 10)

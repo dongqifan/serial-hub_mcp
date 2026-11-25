@@ -9,11 +9,17 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from .core import Hub, HubError, PortConfig
+from .project_service import BOARD_OPS, GUI_OPS, ProjectService
 
 
-async def dispatch(hub: Hub, operation: str, args: dict, owner: str) -> dict:
+async def dispatch(console: ProjectService, operation: str, args: dict, owner: str) -> dict:
+    hub = console.hub
+    if operation in BOARD_OPS:
+        return await console.board_rpc(operation, args, owner)
+    if operation in GUI_OPS:
+        return await console.management(operation, args)
     if operation == "list_ports":
-        return hub.inventory()
+        return await hub.inventory()
     if operation == "open_port":
         config = PortConfig(**args.get("config", {}))
         return await hub.open(args["port"], config)
@@ -42,7 +48,9 @@ async def dispatch(hub: Hub, operation: str, args: dict, owner: str) -> dict:
     raise HubError("Unknown operation")
 
 
-def create_app(hub: Hub) -> Starlette:
+def create_app(hub: Hub, *, request_stop=None) -> Starlette:
+    console = ProjectService(hub, request_stop)
+
     async def rpc(request: Request):
         # No browser-origin requests, even if a malicious page knows the URL.
         if request.headers.get("origin"):
@@ -62,7 +70,7 @@ def create_app(hub: Hub) -> Starlette:
             owner = body.get("owner", "")
             if not isinstance(owner, str) or not 1 <= len(owner) <= 200:
                 raise HubError("Invalid controller identity")
-            result = await dispatch(hub, body["operation"], body.get("arguments", {}), "mcp:" + owner)
+            result = await dispatch(console, body["operation"], body.get("arguments", {}), "mcp:" + owner)
             return JSONResponse(result)
         except (HubError, ValueError, TypeError, KeyError, LookupError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)

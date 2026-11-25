@@ -340,6 +340,7 @@ class Hub:
         self.log_directory, self.factory, self.capacity = log_directory, factory or self._serial, capacity
         self.ports: dict[str, SerialPort] = {}
         self.lifecycle = asyncio.Lock()
+        self.stopping = False
         self.terminals = None
 
     @staticmethod
@@ -359,15 +360,18 @@ class Hub:
             raise HubError(f"{name} is not open. Call open_port first.")
         return self.ports[name]
 
-    def inventory(self) -> dict:
+    async def inventory(self) -> dict:
+        available = await asyncio.to_thread(list_ports.comports)
         return {"available": [{"port": p.device, "description": p.description,
-                               "hwid": p.hwid} for p in list_ports.comports()],
+                               "hwid": p.hwid} for p in available],
                 "open": [p.snapshot() for p in self.ports.values()]}
 
     async def open(self, name: str, config: PortConfig) -> dict:
         name = port_name(name)
         config.validate()
         async with self.lifecycle:
+            if self.stopping:
+                raise HubError("Console service is stopping")
             if name in self.ports:
                 port = self.ports[name]
                 if port.config != config:
@@ -395,9 +399,11 @@ class Hub:
                 raise
             return port.snapshot()
 
-    async def close_port(self, name: str, owner: str) -> dict:
+    async def close_port(self, name: str, owner: str, *, expected_epoch: str | None = None) -> dict:
         async with self.lifecycle:
             port = self.get(name)
+            if expected_epoch is not None and port.epoch != expected_epoch:
+                raise HubError("Serial port was reopened; it was not closed")
             if port.clients or port.active_executions:
                 raise HubError("Port has terminal clients or active execute calls")
             if port.writing or not port.writes.empty():

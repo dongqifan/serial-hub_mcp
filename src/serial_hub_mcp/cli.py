@@ -29,9 +29,13 @@ async def serve(args) -> None:
             print(f"{result['port']}: Telnet {result['telnet']}", flush=True)
         print(f"Serial Hub API: {api_url()} (loopback only)", flush=True)
         print("Authentication disabled; local clients connect directly.", flush=True)
-        config = uvicorn.Config(create_app(hub), host="127.0.0.1",
+        def request_stop():
+            server.should_exit = True
+
+        config = uvicorn.Config(create_app(hub, request_stop=request_stop), host="127.0.0.1",
                                 port=int(api_url().rsplit(":", 1)[1]), access_log=False)
-        await uvicorn.Server(config).serve(sockets=[sock])
+        server = uvicorn.Server(config)
+        await server.serve(sockets=[sock])
     finally:
         await hub.shutdown()
         sock.close()

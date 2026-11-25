@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "serial-hub-mcp"
 version = "0.4.0"
-description = "Shared serial consoles for multiple MCP sessions and Telnet terminals"
+description = "Local project-based development board console for MCP clients and shared serial terminals"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
